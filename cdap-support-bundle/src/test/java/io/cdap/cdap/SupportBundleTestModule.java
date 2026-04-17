@@ -24,9 +24,11 @@ import io.cdap.cdap.app.guice.ProgramRunnerRuntimeModule;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.conf.SConfiguration;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.InMemoryDiscoveryModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.NonCustomLocationUnitTestModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.twill.NoopTwillRunnerService;
@@ -84,8 +86,9 @@ public class SupportBundleTestModule extends AbstractModule {
     install(RemoteAuthenticatorModules.getNoOpModule());
     install(new IOModule());
     install(new InMemoryDiscoveryModule());
-    install(new AppFabricServiceRuntimeModule(cConf).getInMemoryModules());
-    install(new MonitorHandlerModule(false));
+    install(new AppFabricServiceRuntimeModule(cConf, AppFabricServiceRuntimeModule.ALL_SERVICE_TYPES)
+        .getInMemoryModules());
+    install(new MonitorHandlerModule(false, cConf));
     install(new ProgramRunnerRuntimeModule().getInMemoryModules());
     install(new NonCustomLocationUnitTestModule());
     install(new LocalLogAppenderModule());
@@ -102,6 +105,8 @@ public class SupportBundleTestModule extends AbstractModule {
     install(new MetadataReaderWriterModules().getInMemoryModules());
     install(new MessagingServerRuntimeModule().getInMemoryModules());
     install(new MockProvisionerModule());
+    install(new NoOpAuditLogModule());
+    install(new UserCredentialAeadEncryptionModule());
     // Needed by MonitorHandlerModuler
     bind(TwillRunner.class).to(NoopTwillRunnerService.class);
   }

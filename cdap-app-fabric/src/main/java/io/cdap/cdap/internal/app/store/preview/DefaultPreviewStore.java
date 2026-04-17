@@ -13,6 +13,7 @@
  * License for the specific language governing permissions and limitations under
  * the License.
  */
+
 package io.cdap.cdap.internal.app.store.preview;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -54,17 +55,21 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.annotation.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Default implementation of the {@link PreviewStore} that stores data in a level db table.
  */
 public class DefaultPreviewStore implements PreviewStore {
 
+  private static final Logger LOG = LoggerFactory.getLogger(DefaultPreviewStore.class);
   private static final DatasetId PREVIEW_TABLE_ID = NamespaceId.SYSTEM.dataset("preview.table");
   private static final DatasetId PREVIEW_QUEUE_TABLE_ID = NamespaceId.SYSTEM.dataset(
       "preview.queue.table");
   private static final byte[] DATA_ROW_KEY_PREFIX = Bytes.toBytes("dr");
   private static final byte[] META_ROW_KEY_PREFIX = Bytes.toBytes("mr");
+  private static final byte[] POLLER_INFO_TO_APP_ID_PREFIX = Bytes.toBytes("p2a");
   private static final byte[] TRACER = Bytes.toBytes("t");
   private static final byte[] PROPERTY = Bytes.toBytes("p");
   private static final byte[] VALUE = Bytes.toBytes("v");
@@ -84,6 +89,10 @@ public class DefaultPreviewStore implements PreviewStore {
   private static final byte[] CONFIG = Bytes.toBytes("c");
   private static final byte[] APPID = Bytes.toBytes("a");
   private static final byte[] PRINCIPAL = Bytes.toBytes("p");
+  private static final Gson ENTITY_GSON = new GsonBuilder().registerTypeAdapter(EntityId.class,
+      new EntityIdTypeAdapter()).create();
+  private static final Gson SCHEMA_GSON = new GsonBuilder().registerTypeAdapter(Schema.class,
+      new SchemaTypeAdapter()).create();
 
   private final AtomicLong counter = new AtomicLong(0L);
 
@@ -127,9 +136,6 @@ public class DefaultPreviewStore implements PreviewStore {
 
   @Override
   public Map<String, List<JsonElement>> get(ApplicationId applicationId, String tracerName) {
-    // PreviewStore is a singleton and we have to create gson for each operation since gson is not thread safe.
-    Gson gson = new GsonBuilder().registerTypeAdapter(Schema.class, new SchemaTypeAdapter())
-        .create();
     byte[] startRowKey = getPreviewRowKeyBuilder(DATA_ROW_KEY_PREFIX, applicationId)
         .add(tracerName).build().getKey();
     byte[] stopRowKey = new MDSKey(Bytes.stopKeyForPrefix(startRowKey)).getKey();
@@ -140,7 +146,7 @@ public class DefaultPreviewStore implements PreviewStore {
       while ((indexRow = scanner.next()) != null) {
         Map<byte[], byte[]> columns = indexRow.getColumns();
         String propertyName = Bytes.toString(columns.get(PROPERTY));
-        JsonElement value = gson.fromJson(Bytes.toString(columns.get(VALUE)), JsonElement.class);
+        JsonElement value = SCHEMA_GSON.fromJson(Bytes.toString(columns.get(VALUE)), JsonElement.class);
         List<JsonElement> values = result.computeIfAbsent(propertyName, k -> new ArrayList<>());
         values.add(value);
       }
@@ -167,6 +173,18 @@ public class DefaultPreviewStore implements PreviewStore {
 
   @Override
   public void remove(ApplicationId applicationId) {
+    byte[] pollerInfo = getPreviewRequestPollerInfo(applicationId);
+    if (pollerInfo != null) {
+      MDSKey indexKey = new MDSKey.Builder().add(POLLER_INFO_TO_APP_ID_PREFIX).add(pollerInfo)
+          .build();
+      try {
+        previewTable.deleteDefaultVersion(indexKey.getKey(), APPID);
+      } catch (IOException e) {
+        // It is ok to not throw exception here, as the data will be eventually cleaned up by the ttl remover.
+        LOG.warn("Failed to delete poller info for application {}", applicationId, e);
+      }
+    }
+
     removeFromWaitingState(applicationId);
     // remove actual preview user data
     removePreviewData(DATA_ROW_KEY_PREFIX, applicationId);
@@ -176,14 +194,11 @@ public class DefaultPreviewStore implements PreviewStore {
 
   @Override
   public void setProgramId(ProgramRunId programRunId) {
-    // PreviewStore is a singleton and we have to create gson for each operation since gson is not thread safe.
-    Gson gson = new GsonBuilder().registerTypeAdapter(EntityId.class, new EntityIdTypeAdapter())
-        .create();
     MDSKey mdsKey = getPreviewRowKeyBuilder(META_ROW_KEY_PREFIX,
         programRunId.getParent().getParent()).build();
     try {
       previewTable.putDefaultVersion(mdsKey.getKey(), RUN,
-          Bytes.toBytes(gson.toJson(programRunId)));
+          Bytes.toBytes(ENTITY_GSON.toJson(programRunId)));
     } catch (IOException e) {
       throw new RuntimeException(String.format("Failed to put %s into preview store", programRunId),
           e);
@@ -192,9 +207,6 @@ public class DefaultPreviewStore implements PreviewStore {
 
   @Override
   public ProgramRunId getProgramRunId(ApplicationId applicationId) {
-    // PreviewStore is a singleton and we have to create gson for each operation since gson is not thread safe.
-    Gson gson = new GsonBuilder().registerTypeAdapter(EntityId.class, new EntityIdTypeAdapter())
-        .create();
     MDSKey mdsKey = getPreviewRowKeyBuilder(META_ROW_KEY_PREFIX, applicationId).build();
 
     byte[] runId = null;
@@ -206,7 +218,7 @@ public class DefaultPreviewStore implements PreviewStore {
           String.format("Failed to get program run id for preview %s", applicationId), e);
     }
     if (runId != null) {
-      return gson.fromJson(Bytes.toString(runId), ProgramRunId.class);
+      return ENTITY_GSON.fromJson(Bytes.toString(runId), ProgramRunId.class);
     }
     return null;
   }
@@ -253,9 +265,6 @@ public class DefaultPreviewStore implements PreviewStore {
   @Override
   public void add(ApplicationId applicationId, AppRequest appRequest,
       @Nullable Principal principal) {
-    // PreviewStore is a singleton and we have to create gson for each operation since gson is not thread safe.
-    Gson gson = new GsonBuilder().registerTypeAdapter(Schema.class, new SchemaTypeAdapter())
-        .create();
     long timeInSeconds = RunIds.getTime(applicationId.getApplication(), TimeUnit.SECONDS);
     MDSKey mdsKey = new MDSKey.Builder()
         .add(WAITING)
@@ -266,11 +275,11 @@ public class DefaultPreviewStore implements PreviewStore {
 
     try {
       previewQueueTable.putDefaultVersion(mdsKey.getKey(), APPID,
-          Bytes.toBytes(gson.toJson(applicationId)));
+          Bytes.toBytes(SCHEMA_GSON.toJson(applicationId)));
       previewQueueTable.putDefaultVersion(mdsKey.getKey(), CONFIG,
-          Bytes.toBytes(gson.toJson(appRequest)));
+          Bytes.toBytes(SCHEMA_GSON.toJson(appRequest)));
       previewQueueTable.putDefaultVersion(mdsKey.getKey(), PRINCIPAL,
-          Bytes.toBytes(gson.toJson(principal)));
+          Bytes.toBytes(SCHEMA_GSON.toJson(principal)));
       long submitTimeInMillis = RunIds.getTime(applicationId.getApplication(),
           TimeUnit.MILLISECONDS);
       setPreviewStatus(applicationId,
@@ -307,9 +316,6 @@ public class DefaultPreviewStore implements PreviewStore {
 
   @Override
   public List<PreviewRequest> getAllInWaitingState() {
-    // PreviewStore is a singleton and we have to create gson for each operation since gson is not thread safe.
-    Gson gson = new GsonBuilder().registerTypeAdapter(Schema.class, new SchemaTypeAdapter())
-        .create();
     byte[] startRowKey = new MDSKey.Builder().add(WAITING).build().getKey();
     byte[] stopRowKey = new MDSKey(Bytes.stopKeyForPrefix(startRowKey)).getKey();
 
@@ -318,10 +324,10 @@ public class DefaultPreviewStore implements PreviewStore {
       Row indexRow;
       while ((indexRow = scanner.next()) != null) {
         Map<byte[], byte[]> columns = indexRow.getColumns();
-        AppRequest request = gson.fromJson(Bytes.toString(columns.get(CONFIG)), AppRequest.class);
-        ApplicationId applicationId = gson.fromJson(Bytes.toString(columns.get(APPID)),
+        AppRequest request = SCHEMA_GSON.fromJson(Bytes.toString(columns.get(CONFIG)), AppRequest.class);
+        ApplicationId applicationId = SCHEMA_GSON.fromJson(Bytes.toString(columns.get(APPID)),
             ApplicationId.class);
-        Principal principal = gson.fromJson(Bytes.toString(columns.get(PRINCIPAL)),
+        Principal principal = SCHEMA_GSON.fromJson(Bytes.toString(columns.get(PRINCIPAL)),
             Principal.class);
         result.add(new PreviewRequest(applicationId, request, principal));
       }
@@ -355,9 +361,6 @@ public class DefaultPreviewStore implements PreviewStore {
   }
 
   private void setPollerinfo(ApplicationId applicationId, byte[] pollerInfo) {
-    // PreviewStore is a singleton and we have to create gson for each operation since gson is not thread safe.
-    Gson gson = new GsonBuilder().registerTypeAdapter(Schema.class, new SchemaTypeAdapter())
-        .create();
     MDSKey mdsKey = getPreviewRowKeyBuilder(META_ROW_KEY_PREFIX, applicationId).build();
 
     try {
@@ -365,8 +368,18 @@ public class DefaultPreviewStore implements PreviewStore {
     } catch (IOException e) {
       String msg = String.format(
           "Error while setting the poller information %s for waiting preview application %s.",
-          gson.toJson(pollerInfo), applicationId);
+          SCHEMA_GSON.toJson(pollerInfo), applicationId);
       throw new RuntimeException(msg, e);
+    }
+
+    // Add an entry to the index: pollerInfo -> applicationId
+    MDSKey indexKey = new MDSKey.Builder().add(POLLER_INFO_TO_APP_ID_PREFIX).add(pollerInfo)
+        .build();
+    try {
+      previewTable.putDefaultVersion(indexKey.getKey(), APPID,
+          Bytes.toBytes(SCHEMA_GSON.toJson(applicationId)));
+    } catch (IOException e) {
+      throw new RuntimeException("Error while creating poller info index.", e);
     }
   }
 
@@ -381,17 +394,25 @@ public class DefaultPreviewStore implements PreviewStore {
       throw new RuntimeException(
           String.format("Failed to get the poller info for preview %s", applicationId), e);
     }
-    if (pollerInfo != null) {
-      return pollerInfo;
-    }
+    return pollerInfo;
+  }
 
-    return null;
+  public ApplicationId getApplicationId(byte[] pollerInfo) {
+    MDSKey indexKey = new MDSKey.Builder().add(POLLER_INFO_TO_APP_ID_PREFIX).add(pollerInfo)
+        .build();
+    try {
+      byte[] applicationIdBytes = previewTable.getDefaultVersion(indexKey.getKey(), APPID);
+      if (applicationIdBytes == null) {
+        return null;
+      }
+      return SCHEMA_GSON.fromJson(Bytes.toString(applicationIdBytes), ApplicationId.class);
+    } catch (IOException e) {
+      throw new RuntimeException("Error while getting application id for poller info.", e);
+    }
   }
 
   @Override
   public void deleteExpiredData(long ttlInSeconds) {
-    Gson gson = new GsonBuilder().registerTypeAdapter(EntityId.class, new EntityIdTypeAdapter())
-        .create();
     byte[] startRowKey = new MDSKey.Builder().add(META_ROW_KEY_PREFIX).build().getKey();
     byte[] stopRowKey = new MDSKey(Bytes.stopKeyForPrefix(startRowKey)).getKey();
 
@@ -405,7 +426,7 @@ public class DefaultPreviewStore implements PreviewStore {
           continue;
         }
 
-        ApplicationId applicationId = gson.fromJson(applicationIdGson, ApplicationId.class);
+        ApplicationId applicationId = ENTITY_GSON.fromJson(applicationIdGson, ApplicationId.class);
         long applicationSubmitTime = RunIds.getTime(applicationId.getApplication(),
             TimeUnit.SECONDS);
         if ((currentTimeInSeconds - applicationSubmitTime) > ttlInSeconds) {

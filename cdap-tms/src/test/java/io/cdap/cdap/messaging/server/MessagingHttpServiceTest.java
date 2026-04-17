@@ -29,23 +29,25 @@ import io.cdap.cdap.api.metrics.MetricsCollectionService;
 import io.cdap.cdap.common.ServiceException;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.InMemoryDiscoveryModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.internal.remote.RemoteClientFactory;
 import io.cdap.cdap.common.metrics.NoOpMetricsCollectionService;
 import io.cdap.cdap.messaging.DefaultMessageFetchRequest;
 import io.cdap.cdap.messaging.DefaultTopicMetadata;
+import io.cdap.cdap.messaging.client.DefaultClientMessagingService;
+import io.cdap.cdap.messaging.client.StoreRequestBuilder;
+import io.cdap.cdap.messaging.data.MessageId;
+import io.cdap.cdap.messaging.guice.MessagingServerRuntimeModule;
 import io.cdap.cdap.messaging.spi.MessageFetchRequest;
 import io.cdap.cdap.messaging.spi.MessagingService;
+import io.cdap.cdap.messaging.spi.RawMessage;
 import io.cdap.cdap.messaging.spi.RollbackDetail;
 import io.cdap.cdap.messaging.spi.StoreRequest;
 import io.cdap.cdap.messaging.spi.TopicMetadata;
-import io.cdap.cdap.messaging.client.ClientMessagingService;
-import io.cdap.cdap.messaging.client.StoreRequestBuilder;
-import io.cdap.cdap.messaging.data.MessageId;
-import io.cdap.cdap.messaging.spi.RawMessage;
-import io.cdap.cdap.messaging.guice.MessagingServerRuntimeModule;
 import io.cdap.cdap.proto.id.NamespaceId;
 import io.cdap.cdap.proto.id.TopicId;
 import io.cdap.cdap.security.auth.context.AuthenticationContextModules;
@@ -117,6 +119,8 @@ public class MessagingHttpServiceTest {
       new AuthenticationContextModules().getNoOpModule(),
       new AuthorizationEnforcementModule().getNoOpModules(),
       new MessagingServerRuntimeModule().getInMemoryModules(),
+      new NoOpAuditLogModule(),
+      new UserCredentialAeadEncryptionModule(),
       new AbstractModule() {
         @Override
         protected void configure() {
@@ -127,7 +131,7 @@ public class MessagingHttpServiceTest {
 
     httpService = injector.getInstance(MessagingHttpService.class);
     httpService.startAndWait();
-    client = new ClientMessagingService(injector.getInstance(RemoteClientFactory.class), compressPayload);
+    client = new DefaultClientMessagingService(injector.getInstance(RemoteClientFactory.class), compressPayload);
   }
 
   @After
@@ -202,7 +206,7 @@ public class MessagingHttpServiceTest {
     client.updateTopic(new DefaultTopicMetadata(topic1, "ttl", "5"));
 
     // Get the topic t1 properties. Verify TTL is updated
-    Assert.assertEquals(5, new DefaultTopicMetadata(topic1,client.getTopicMetadataProperties(topic1)).getTTL());
+    Assert.assertEquals(5, new DefaultTopicMetadata(topic1, client.getTopicMetadataProperties(topic1)).getTTL());
 
     // Try to add another topic t2 with invalid ttl, it should fail
     try {

@@ -24,7 +24,7 @@
   <parent>
     <groupId>io.cdap.cdap</groupId>
     <artifactId>cdap</artifactId>
-    <version>6.11.0-SNAPSHOT</version>
+    <version>6.12.0-SNAPSHOT</version>
   </parent>
 
   <artifactId>cdap-standalone</artifactId>
@@ -476,7 +476,7 @@
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-dependency-plugin</artifactId>
-            <version>2.8</version>
+            <version>3.8.1</version>
             <executions>
               <execution>
                 <id>copy-dependencies</id>
@@ -742,7 +742,7 @@
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-antrun-plugin</artifactId>
-            <version>1.7</version>
+            <version>3.1.0</version>
             <executions>
               <!-- Copy any additional system artifacts.
                    For example, if you want to include plugins from hydrator-plugins. -->
@@ -853,32 +853,6 @@
                   <appendAssemblyId>false</appendAssemblyId>
                   <attach>false</attach>
                   <finalName>cdap-sandbox-${project.version}</finalName>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-
-          <!-- Extra deployment for cdap sdk -->
-          <plugin>
-            <groupId>org.apache.maven.plugins</groupId>
-            <artifactId>maven-deploy-plugin</artifactId>
-            <version>2.8</version>
-            <executions>
-              <execution>
-                <id>deploy-sdk</id>
-                <phase>deploy</phase>
-                <goals>
-                  <goal>deploy-file</goal>
-                </goals>
-                <configuration>
-                  <version>${project.version}</version>
-                  <groupId>${project.groupId}</groupId>
-                  <artifactId>cdap-sandbox</artifactId>
-                  <packaging>zip</packaging>
-                  <generatePom>false</generatePom>
-                  <file>${project.build.directory}/cdap-sandbox-${project.version}.zip</file>
-                  <repositoryId>continuuity</repositoryId>
-                  <url>${deploy.url}</url>
                 </configuration>
               </execution>
             </executions>

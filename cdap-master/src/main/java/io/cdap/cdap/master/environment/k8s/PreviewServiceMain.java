@@ -25,6 +25,7 @@ import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.Scopes;
 import io.cdap.cdap.app.guice.AppFabricServiceRuntimeModule;
+import io.cdap.cdap.app.guice.AppFabricServiceRuntimeModule.ServiceType;
 import io.cdap.cdap.app.guice.AuthorizationModule;
 import io.cdap.cdap.app.guice.ProgramRunnerRuntimeModule;
 import io.cdap.cdap.app.preview.PreviewHttpServer;
@@ -98,7 +99,7 @@ public class PreviewServiceMain extends AbstractServiceMain<EnvironmentOptions> 
     List<Module> modules = new ArrayList<>(Arrays.asList(
         new DataSetServiceModules().getStandaloneModules(),
         new DataSetsModules().getStandaloneModules(),
-        new AppFabricServiceRuntimeModule(cConf).getStandaloneModules(),
+        new AppFabricServiceRuntimeModule(cConf, ServiceType.SERVER).getStandaloneModules(),
         new ProgramRunnerRuntimeModule().getStandaloneModules(),
         new MetricsStoreModule(),
         new MessagingServiceModule(cConf),
@@ -122,9 +123,9 @@ public class PreviewServiceMain extends AbstractServiceMain<EnvironmentOptions> 
     ));
 
     if (cConf.getInt(Constants.Preview.CONTAINER_COUNT) > 0) {
-      modules.add(new PreviewManagerModule(true));
+      modules.add(new PreviewManagerModule(cConf, true));
     } else {
-      modules.add(new PreviewManagerModule(false));
+      modules.add(new PreviewManagerModule(cConf, false));
       modules.add(new PreviewRunnerManagerModule().getStandaloneModules());
     }
 

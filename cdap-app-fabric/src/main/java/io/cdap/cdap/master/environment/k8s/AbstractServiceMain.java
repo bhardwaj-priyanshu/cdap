@@ -27,10 +27,12 @@ import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.Module;
 import io.cdap.cdap.api.metrics.MetricsCollectionService;
+import io.cdap.cdap.app.guice.AuditLogWriterModule;
 import io.cdap.cdap.app.preview.PreviewConfigModule;
 import io.cdap.cdap.common.app.MainClassLoader;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.SConfiguration;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
@@ -168,6 +170,8 @@ public abstract class AbstractServiceMain<T extends EnvironmentOptions> extends 
     modules.add(new PreviewConfigModule(cConf, hConf, sConf));
     modules.add(new IOModule());
     modules.add(new MetricsClientRuntimeModule().getDistributedModules());
+    modules.add(new AuditLogWriterModule(cConf).getDistributedModules());
+    modules.add(new UserCredentialAeadEncryptionModule());
     modules.add(new AbstractModule() {
       @Override
       protected void configure() {

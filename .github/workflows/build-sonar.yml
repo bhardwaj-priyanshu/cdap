@@ -21,6 +21,9 @@ on:
     branches: [ develop, release/** ]
     types: [opened, synchronize, reopened, labeled]
 
+permissions:
+  checks: write
+
 jobs:
   build-sonar:
     runs-on: k8s-runner-build
@@ -38,6 +41,14 @@ jobs:
          )
 
     steps:
+      - name: Set up Spanner Emulator
+        run: |
+          gcloud config configurations create emulator
+          gcloud config set auth/disable_credentials true
+          gcloud config set api_endpoint_overrides/spanner http://localhost:9010/
+          gcloud config configurations activate emulator
+          gcloud emulators spanner start &
+          echo "SPANNER_EMULATOR_HOST=localhost:9010" >> $GITHUB_ENV
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -67,11 +78,13 @@ jobs:
           path: |
             **/target/rat.txt
             **/target/surefire-reports/*
+            **/checkstyle-result.xml
 
       - name: Sonar Report on PR
         if: ${{ github.event_name == 'pull_request' }}
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
         run: >-
           mvn org.sonarsource.scanner.maven:sonar-maven-plugin:sonar -fae -T 2 -B -V
@@ -81,7 +94,7 @@ jobs:
           -Dmaven.wagon.http.retryHandler.count=3
           -Dmaven.wagon.httpconnectionManager.ttlSeconds=25
           -Dsonar.pullrequest.key=${{ github.event.pull_request.number }}
-          -Dsonar.pullrequest.branch=${{ github.event.pull_request.head.ref }}
+          -Dsonar.pullrequest.branch="$PR_HEAD_REF"
           -Dsonar.pullrequest.base=${{ github.event.pull_request.base.ref }}
 
       - name: Sonar report
@@ -98,3 +111,12 @@ jobs:
           -Dmaven.wagon.http.retryHandler.count=3
           -Dmaven.wagon.httpconnectionManager.ttlSeconds=25
           -Dsonar.branch.name=$BRANCH
+
+      - name: Checkstyle report
+        uses: cdapio/checkstyle-github-action@add_filter
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          path: '**/checkstyle-result.xml'
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit: ${{ github.event.pull_request.head.sha }}
+          changed-since: ${{ github.event.pull_request.base.ref }}

@@ -26,8 +26,10 @@ import com.google.inject.Guice;
 import com.google.inject.Injector;
 import com.google.inject.Module;
 import io.cdap.cdap.api.metrics.MetricsCollectionService;
+import io.cdap.cdap.app.guice.AuditLogWriterModule;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.KafkaClientModule;
@@ -44,7 +46,7 @@ import io.cdap.cdap.logging.guice.KafkaLogAppenderModule;
 import io.cdap.cdap.logging.guice.RemoteLogAppenderModule;
 import io.cdap.cdap.master.environment.MasterEnvironments;
 import io.cdap.cdap.master.spi.environment.MasterEnvironment;
-import io.cdap.cdap.messaging.guice.MessagingServiceModule;
+import io.cdap.cdap.messaging.guice.client.TaskWorkerMessagingClientModule;
 import io.cdap.cdap.metrics.guice.MetricsClientRuntimeModule;
 import io.cdap.cdap.proto.id.NamespaceId;
 import io.cdap.cdap.security.auth.context.AuthenticationContextModules;
@@ -94,9 +96,11 @@ public class TaskWorkerTwillRunnable extends AbstractTwillRunnable {
     modules.add(new IOModule());
     modules.add(new AuthenticationContextModules().getMasterWorkerModule());
     modules.add(coreSecurityModule);
-    modules.add(new MessagingServiceModule(cConf));
+    modules.add(new TaskWorkerMessagingClientModule(cConf));
     modules.add(new SystemAppModule());
     modules.add(new MetricsClientRuntimeModule().getDistributedModules());
+    modules.add(new AuditLogWriterModule(cConf).getDistributedModules());
+    modules.add(new UserCredentialAeadEncryptionModule());
 
     // If MasterEnvironment is not available, assuming it is the old hadoop stack with ZK, Kafka
     MasterEnvironment masterEnv = MasterEnvironments.getMasterEnvironment();

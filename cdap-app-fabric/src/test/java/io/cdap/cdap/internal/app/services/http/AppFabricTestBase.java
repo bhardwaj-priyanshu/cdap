@@ -32,6 +32,7 @@ import com.google.inject.Guice;
 import com.google.inject.Injector;
 import com.google.inject.Module;
 import com.google.inject.Scopes;
+import com.google.inject.name.Names;
 import com.google.inject.util.Modules;
 import io.cdap.cdap.api.Config;
 import io.cdap.cdap.api.ProgramStatus;
@@ -58,6 +59,9 @@ import io.cdap.cdap.common.conf.Constants.Gateway;
 import io.cdap.cdap.common.discovery.EndpointStrategy;
 import io.cdap.cdap.common.discovery.RandomEndpointStrategy;
 import io.cdap.cdap.common.discovery.URIScheme;
+import io.cdap.cdap.common.encryption.AeadCipher;
+import io.cdap.cdap.common.encryption.NoOpAeadCipher;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.id.Id;
 import io.cdap.cdap.common.internal.remote.DefaultInternalAuthenticator;
 import io.cdap.cdap.common.internal.remote.RemoteClientFactory;
@@ -77,6 +81,7 @@ import io.cdap.cdap.internal.app.runtime.schedule.ProgramScheduleStatus;
 import io.cdap.cdap.internal.app.runtime.schedule.store.Schedulers;
 import io.cdap.cdap.internal.app.runtime.schedule.trigger.SatisfiableTrigger;
 import io.cdap.cdap.internal.app.runtime.schedule.trigger.TriggerCodec;
+import io.cdap.cdap.internal.app.services.AppFabricProcessorService;
 import io.cdap.cdap.internal.app.services.AppFabricServer;
 import io.cdap.cdap.internal.guice.AppFabricTestModule;
 import io.cdap.cdap.internal.schedule.constraint.Constraint;
@@ -211,6 +216,7 @@ public abstract class AppFabricTestBase {
   private static MessagingService messagingService;
   private static TransactionManager txManager;
   private static AppFabricServer appFabricServer;
+  private static AppFabricProcessorService appFabricProcessorService;
   private static MetricsCollectionService metricsCollectionService;
   private static DatasetOpExecutorService dsOpService;
   private static DatasetService datasetService;
@@ -245,6 +251,9 @@ public abstract class AppFabricTestBase {
         // needed because we set Kerberos to true in DefaultNamespaceAdminTest
         bind(UGIProvider.class).to(CurrentUGIProvider.class);
         bind(MetadataSubscriberService.class).in(Scopes.SINGLETON);
+        install(new NoOpAuditLogModule());
+        bind(AeadCipher.class).annotatedWith(Names.named("UserCredentialEncryption")).to(
+            NoOpAeadCipher.class);
       }
     });
   }
@@ -275,6 +284,8 @@ public abstract class AppFabricTestBase {
 
     appFabricServer = injector.getInstance(AppFabricServer.class);
     appFabricServer.startAndWait();
+    appFabricProcessorService = injector.getInstance(AppFabricProcessorService.class);
+    appFabricProcessorService.startAndWait();
     DiscoveryServiceClient discoveryClient = injector.getInstance(DiscoveryServiceClient.class);
     appFabricEndpointStrategy = new RandomEndpointStrategy(
       () -> discoveryClient.discover(Constants.Service.APP_FABRIC_HTTP));
@@ -313,6 +324,7 @@ public abstract class AppFabricTestBase {
   @AfterClass
   public static void afterClass() {
     appFabricServer.stopAndWait();
+    appFabricProcessorService.stopAndWait();
     metricsCollectionService.stopAndWait();
     datasetService.stopAndWait();
     dsOpService.stopAndWait();
@@ -639,22 +651,55 @@ public abstract class AppFabricTestBase {
     return readResponse(response, LIST_JSON_OBJECT_TYPE);
   }
 
-  protected JsonObject getAppListForPaginatedApi(String namespace, int pageSize, String token,
-                                                 String filter) throws Exception {
-    return getAppListForPaginatedApi(namespace, pageSize, token, null, filter, null, null, null);
+  protected long getAppCount(String namespace) throws Exception {
+    HttpResponse response = doGet(getVersionedApiPath("apps/count",
+        Constants.Gateway.API_VERSION_3_TOKEN, namespace));
+    assertResponseCode(200, response);
+    return Long.parseLong(response.getResponseBodyAsString());
   }
 
-  protected JsonObject getAppListForPaginatedApi(String namespace, int pageSize, String token,
-                                                 String filter, String nameFilterType,
-                                                 Boolean latestOnly, Boolean sortCreationTime) throws Exception {
-    return getAppListForPaginatedApi(namespace, pageSize, token, null, filter, nameFilterType, latestOnly,
-                                     sortCreationTime);
-  }
 
-  protected JsonObject getAppListForPaginatedApi(String namespace, int pageSize, String token,
-                                                 String orderBy, String filter, String nameFilterType,
-                                                 Boolean latestOnly, Boolean sortCreationTime) throws Exception {
+  protected List<JsonObject> getAppListForNegativePaginatedApi(String namespace, int pageSize) throws Exception {
     String uri = "apps/?pageSize=" + pageSize;
+
+    HttpResponse response = doGet(getVersionedApiPath(uri,
+        Constants.Gateway.API_VERSION_3_TOKEN, namespace));
+    assertResponseCode(200, response);
+    return readResponse(response, LIST_JSON_OBJECT_TYPE);
+  }
+
+  protected List<JsonObject> getAppListForDefaultPaginationDisabledApi(String namespace,
+      Boolean enabledDefaultPagination) throws Exception {
+    String uri = "apps/?enabledDefaultPagination=" + enabledDefaultPagination;
+
+    HttpResponse response = doGet(getVersionedApiPath(uri,
+        Constants.Gateway.API_VERSION_3_TOKEN, namespace));
+    assertResponseCode(200, response);
+    return readResponse(response, LIST_JSON_OBJECT_TYPE);
+  }
+
+  protected JsonObject getAppListForPaginatedApi(String namespace, Integer pageSize, String token,
+      String filter) throws Exception {
+    return getAppListForPaginatedApi(namespace, pageSize, token, null, filter, null, null, null, false);
+  }
+
+  protected JsonObject getAppListForPaginatedApi(String namespace, Integer pageSize, String token,
+      String filter, String nameFilterType,
+      Boolean latestOnly, Boolean sortCreationTime,
+      boolean enableDefaultPagination) throws Exception {
+    return getAppListForPaginatedApi(namespace, pageSize, token, null, filter, nameFilterType, latestOnly,
+        sortCreationTime, enableDefaultPagination);
+  }
+
+  protected JsonObject getAppListForPaginatedApi(String namespace, Integer pageSize, String token,
+                                                 String orderBy, String filter, String nameFilterType,
+                                                 Boolean latestOnly, Boolean sortCreationTime,
+      boolean enableDefaultPagination) throws Exception {
+    String uri = "apps/?";
+
+    if (pageSize != null) {
+      uri += ("&pageSize=" + pageSize);
+    }
 
     if (token != null) {
       uri += ("&pageToken=" + token);
@@ -680,6 +725,11 @@ public abstract class AppFabricTestBase {
       uri += ("&sortCreationTime=" + sortCreationTime);
     }
 
+    if (enableDefaultPagination) {
+      uri += ("&enableDefaultPagination=" + enableDefaultPagination);
+    }
+
+    uri = uri.replace("?&", "?");
     HttpResponse response = doGet(getVersionedApiPath(uri,
                                                       Constants.Gateway.API_VERSION_3_TOKEN, namespace));
     assertResponseCode(200, response);

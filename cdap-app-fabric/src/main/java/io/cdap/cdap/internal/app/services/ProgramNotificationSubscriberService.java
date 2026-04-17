@@ -33,6 +33,7 @@ import io.cdap.cdap.api.workflow.WorkflowNode;
 import io.cdap.cdap.api.workflow.WorkflowSpecification;
 import io.cdap.cdap.app.program.ProgramDescriptor;
 import io.cdap.cdap.app.runtime.ProgramOptions;
+import io.cdap.cdap.app.runtime.ProgramRuntimeService;
 import io.cdap.cdap.app.runtime.ProgramStateWriter;
 import io.cdap.cdap.app.store.Store;
 import io.cdap.cdap.common.app.RunIds;
@@ -89,9 +90,9 @@ import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 import javax.annotation.Nullable;
+import org.apache.twill.api.RunId;
 import org.apache.twill.internal.CompositeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -101,16 +102,20 @@ import org.slf4j.LoggerFactory;
  * events topic
  */
 public class ProgramNotificationSubscriberService extends AbstractIdleService {
+
+  private static final Logger LOG =
+      LoggerFactory.getLogger(ProgramNotificationSubscriberService.class);
   private final MessagingService messagingService;
   private final CConfiguration cConf;
   private final MetricsCollectionService metricsCollectionService;
   private final ProvisionerNotifier provisionerNotifier;
   private final ProgramLifecycleService programLifecycleService;
+  private final ProgramRuntimeService runtimeService;
   private final ProvisioningService provisioningService;
   private final ProgramStateWriter programStateWriter;
   private final TransactionRunner transactionRunner;
   private final Store store;
-  private final RunRecordMonitorService runRecordMonitorService;
+  private final FlowControlService flowControlService;
   private Service delegate;
   private Set<ProgramCompletionNotifier> programCompletionNotifiers;
 
@@ -121,22 +126,24 @@ public class ProgramNotificationSubscriberService extends AbstractIdleService {
       MetricsCollectionService metricsCollectionService,
       ProvisionerNotifier provisionerNotifier,
       ProgramLifecycleService programLifecycleService,
+      ProgramRuntimeService runtimeService,
       ProvisioningService provisioningService,
       ProgramStateWriter programStateWriter,
       TransactionRunner transactionRunner,
       Store store,
-      RunRecordMonitorService runRecordMonitorService) {
+      FlowControlService flowControlService) {
 
     this.messagingService = messagingService;
     this.cConf = cConf;
     this.metricsCollectionService = metricsCollectionService;
     this.provisionerNotifier = provisionerNotifier;
     this.programLifecycleService = programLifecycleService;
+    this.runtimeService = runtimeService;
     this.provisioningService = provisioningService;
     this.programStateWriter = programStateWriter;
     this.transactionRunner = transactionRunner;
     this.store = store;
-    this.runRecordMonitorService = runRecordMonitorService;
+    this.flowControlService = flowControlService;
     this.programCompletionNotifiers = Collections.emptySet();
   }
 
@@ -145,6 +152,8 @@ public class ProgramNotificationSubscriberService extends AbstractIdleService {
     List<Service> children = new ArrayList<>();
     String topicPrefix = cConf.get(Constants.AppFabric.PROGRAM_STATUS_EVENT_TOPIC);
     int numPartitions = cConf.getInt(Constants.AppFabric.PROGRAM_STATUS_EVENT_NUM_PARTITIONS);
+    // Active runs should be restored only once not for every shard that is created.
+    restoreActiveRuns();
     // Add bare one - we always listen to it
     children.add(createChildService("program.status", topicPrefix));
     // If number of partitions is more than 1 - create partitioned services
@@ -153,8 +162,58 @@ public class ProgramNotificationSubscriberService extends AbstractIdleService {
           .forEach(i -> children.add(createChildService("program.status." + i, topicPrefix + i)));
     }
     delegate = new CompositeService(children);
-
     delegate.startAndWait();
+    // Explicitly emit both launching and running counts on startup.
+    emitFlowControlMetrics();
+  }
+
+  private void emitFlowControlMetrics() {
+    flowControlService.emitFlowControlMetrics();
+  }
+
+  private void restoreActiveRuns() {
+    LOG.info("Restoring active runs");
+    int batchSize = cConf.getInt(Constants.RuntimeMonitor.INIT_BATCH_SIZE);
+    RetryStrategy retryStrategy =
+        RetryStrategies.fromConfiguration(cConf, Constants.Service.RUNTIME_MONITOR_RETRY_PREFIX);
+    long startTs = System.currentTimeMillis();
+
+    Retries.runWithRetries(
+        () ->
+            store.scanActiveRuns(
+                batchSize,
+                (runRecordDetail) -> {
+                  if (runRecordDetail.getStartTs() > startTs) {
+                    return;
+                  }
+                  try {
+                    LOG.info("Found active run: {}", runRecordDetail.getProgramRunId());
+                    if (runRecordDetail.getStatus() == ProgramRunStatus.STARTING) {
+                      ProgramOptions programOptions =
+                          new SimpleProgramOptions(
+                              runRecordDetail.getProgramRunId().getParent(),
+                              new BasicArguments(runRecordDetail.getSystemArgs()),
+                              new BasicArguments(runRecordDetail.getUserArgs()));
+                      ProgramDescriptor programDescriptor = this.store.loadProgram(
+                          runRecordDetail.getProgramRunId().getParent());
+                      // It is unknown what is the state of program runs in STARTING state.
+                      // A STARTING message is published again to retry STARTING logic.
+                      LOG.debug("Retrying to start run {}.", runRecordDetail.getProgramRunId());
+                      programStateWriter.start(
+                          runRecordDetail.getProgramRunId(),
+                          programOptions,
+                          null,
+                          programDescriptor);
+                    }
+                  } catch (Exception e) {
+                    ProgramRunId programRunId = runRecordDetail.getProgramRunId();
+                    LOG.warn(
+                        "Retrying to start run {} failed. Marking it as failed.", programRunId, e);
+                    programStateWriter.error(programRunId, e);
+                  }
+                }),
+        retryStrategy,
+        e -> true);
   }
 
   @Override
@@ -175,11 +234,11 @@ public class ProgramNotificationSubscriberService extends AbstractIdleService {
         metricsCollectionService,
         provisionerNotifier,
         programLifecycleService,
+        runtimeService,
         provisioningService,
         programStateWriter,
         transactionRunner,
-        store,
-        runRecordMonitorService,
+        flowControlService,
         name,
         topicName,
         programCompletionNotifiers);
@@ -195,7 +254,7 @@ class ProgramNotificationSingleTopicSubscriberService
     extends AbstractNotificationSubscriberService {
 
   private static final Logger LOG =
-      LoggerFactory.getLogger(ProgramNotificationSubscriberService.class);
+      LoggerFactory.getLogger(ProgramNotificationSingleTopicSubscriberService.class);
 
   private static final Gson GSON =
       ApplicationSpecificationAdapter.addTypeAdapters(new GsonBuilder()).create();
@@ -215,14 +274,13 @@ class ProgramNotificationSingleTopicSubscriberService
   private final String recordedProgramStatusPublishTopic;
   private final ProvisionerNotifier provisionerNotifier;
   private final ProgramLifecycleService programLifecycleService;
+  private final ProgramRuntimeService runtimeService;
   private final ProvisioningService provisioningService;
   private final ProgramStateWriter programStateWriter;
   private final Queue<Runnable> tasks;
   private final MetricsCollectionService metricsCollectionService;
   private Set<ProgramCompletionNotifier> programCompletionNotifiers;
-  private final CConfiguration cConf;
-  private final Store store;
-  private final RunRecordMonitorService runRecordMonitorService;
+  private final FlowControlService flowControlService;
   private final boolean checkTxSeparation;
 
   ProgramNotificationSingleTopicSubscriberService(
@@ -231,11 +289,11 @@ class ProgramNotificationSingleTopicSubscriberService
       MetricsCollectionService metricsCollectionService,
       ProvisionerNotifier provisionerNotifier,
       ProgramLifecycleService programLifecycleService,
+      ProgramRuntimeService runtimeService,
       ProvisioningService provisioningService,
       ProgramStateWriter programStateWriter,
       TransactionRunner transactionRunner,
-      Store store,
-      RunRecordMonitorService runRecordMonitorService,
+      FlowControlService flowControlService,
       String name,
       String topicName,
       Set<ProgramCompletionNotifier> programCompletionNotifiers) {
@@ -253,14 +311,13 @@ class ProgramNotificationSingleTopicSubscriberService
         cConf.get(Constants.AppFabric.PROGRAM_STATUS_RECORD_EVENT_TOPIC);
     this.provisionerNotifier = provisionerNotifier;
     this.programLifecycleService = programLifecycleService;
+    this.runtimeService = runtimeService;
     this.provisioningService = provisioningService;
     this.programStateWriter = programStateWriter;
     this.tasks = new LinkedList<>();
     this.metricsCollectionService = metricsCollectionService;
     this.programCompletionNotifiers = programCompletionNotifiers;
-    this.runRecordMonitorService = runRecordMonitorService;
-    this.cConf = cConf;
-    this.store = store;
+    this.flowControlService = flowControlService;
 
     // If number of partitions equals 1, DB deadlock cannot happen as a result of concurrent
     // modifications to
@@ -273,55 +330,6 @@ class ProgramNotificationSingleTopicSubscriberService
   @Override
   protected void doStartUp() throws Exception {
     super.doStartUp();
-
-    int batchSize = cConf.getInt(Constants.RuntimeMonitor.INIT_BATCH_SIZE);
-    RetryStrategy retryStrategy =
-        RetryStrategies.fromConfiguration(cConf, Constants.Service.RUNTIME_MONITOR_RETRY_PREFIX);
-    long startTs = System.currentTimeMillis();
-
-    AtomicBoolean launching = new AtomicBoolean(false);
-    Retries.runWithRetries(
-        () ->
-            store.scanActiveRuns(
-                batchSize,
-                (runRecordDetail) -> {
-                  if (runRecordDetail.getStartTs() > startTs) {
-                    return;
-                  }
-                  try {
-                    if (runRecordDetail.getStatus() == ProgramRunStatus.PENDING) {
-                      launching.set(true);
-                      runRecordMonitorService.addRequest(runRecordDetail.getProgramRunId());
-                    } else if (runRecordDetail.getStatus() == ProgramRunStatus.STARTING) {
-                      launching.set(true);
-                      runRecordMonitorService.addRequest(runRecordDetail.getProgramRunId());
-                      // It is unknown what is the state of program runs in STARTING state.
-                      // A STARTING message is published again to retry STARTING logic.
-                      ProgramOptions programOptions =
-                          new SimpleProgramOptions(
-                              runRecordDetail.getProgramRunId().getParent(),
-                              new BasicArguments(runRecordDetail.getSystemArgs()),
-                              new BasicArguments(runRecordDetail.getUserArgs()));
-                      LOG.debug("Retrying to start run {}.", runRecordDetail.getProgramRunId());
-                      programStateWriter.start(
-                          runRecordDetail.getProgramRunId(),
-                          programOptions,
-                          null,
-                          this.store.loadProgram(runRecordDetail.getProgramRunId().getParent()));
-                    }
-                  } catch (Exception e) {
-                    ProgramRunId programRunId = runRecordDetail.getProgramRunId();
-                    LOG.warn(
-                        "Retrying to start run {} failed. Marking it as failed.", programRunId, e);
-                    programStateWriter.error(programRunId, e);
-                  }
-                }),
-        retryStrategy,
-        e -> true);
-    if (!launching.get()) {
-      // there is no launching pipeline
-      runRecordMonitorService.emitLaunchingMetrics(0);
-    }
   }
 
   @Nullable
@@ -544,7 +552,8 @@ class ProgramNotificationSingleTopicSubscriberService
                   SecurityRequestContext.setUserId(
                       prgOptions.getArguments().getOption(ProgramOptionConstants.USER_ID));
                   try {
-                    programLifecycleService.startInternal(prgDescriptor, prgOptions, programRunId);
+                    RunId runId = RunIds.fromString(programRunId.getRun());
+                    runtimeService.run(prgDescriptor, prgOptions, runId);
                   } catch (Exception e) {
                     LOG.error("Failed to start program {}", programRunId, e);
                     programStateWriter.error(programRunId, e);
@@ -581,7 +590,7 @@ class ProgramNotificationSingleTopicSubscriberService
             appMetadataStore.recordProgramRunning(
                 programRunId, logicalStartTimeSecs, twillRunId, messageIdBytes);
         writeToHeartBeatTable(recordedRunRecord, logicalStartTimeSecs, programHeartbeatTable);
-        runRecordMonitorService.removeRequest(programRunId, true);
+        flowControlService.emitFlowControlMetrics();
         long startDelayTime =
             logicalStartTimeSecs - RunIds.getTime(programRunId.getRun(), TimeUnit.SECONDS);
         emitStartingTimeMetric(programRunId, startDelayTime, recordedRunRecord);
@@ -659,7 +668,7 @@ class ProgramNotificationSingleTopicSubscriberService
                 Constants.Metrics.Program.PROGRAM_REJECTED_RUNS,
                 null)
             .ifPresent(runnables::add);
-        runRecordMonitorService.removeRequest(programRunId, true);
+        flowControlService.emitFlowControlMetrics();
         break;
       default:
         // This should not happen
@@ -773,7 +782,7 @@ class ProgramNotificationSingleTopicSubscriberService
             programCompletionNotifiers.forEach(
                 notifier ->
                     notifier.onProgramCompleted(programRunId, recordedRunRecord.getStatus()));
-            runRecordMonitorService.removeRequest(programRunId, true);
+            flowControlService.emitFlowControlMetrics();
           });
     }
     return recordedRunRecord;

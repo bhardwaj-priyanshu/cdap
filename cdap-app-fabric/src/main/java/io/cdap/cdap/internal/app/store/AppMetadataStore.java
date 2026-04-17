@@ -20,6 +20,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import com.google.common.reflect.TypeToken;
 import com.google.gson.Gson;
@@ -39,10 +40,12 @@ import io.cdap.cdap.common.BadRequestException;
 import io.cdap.cdap.common.ConflictException;
 import io.cdap.cdap.common.app.RunIds;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.conf.Constants.AppMetaStore;
 import io.cdap.cdap.internal.app.ApplicationSpecificationAdapter;
 import io.cdap.cdap.internal.app.runtime.ProgramOptionConstants;
 import io.cdap.cdap.internal.app.runtime.SystemArguments;
 import io.cdap.cdap.internal.app.runtime.workflow.BasicWorkflowToken;
+import io.cdap.cdap.internal.app.store.adapters.ApplicationMetaAdapter;
 import io.cdap.cdap.proto.BasicThrowable;
 import io.cdap.cdap.proto.ProgramRunCluster;
 import io.cdap.cdap.proto.ProgramRunClusterStatus;
@@ -59,6 +62,7 @@ import io.cdap.cdap.proto.id.ProgramId;
 import io.cdap.cdap.proto.id.ProgramReference;
 import io.cdap.cdap.proto.id.ProgramRunId;
 import io.cdap.cdap.proto.sourcecontrol.SourceControlMeta;
+import io.cdap.cdap.spi.data.FieldSizeLimitExceededException;
 import io.cdap.cdap.spi.data.SortOrder;
 import io.cdap.cdap.spi.data.StructuredRow;
 import io.cdap.cdap.spi.data.StructuredTable;
@@ -67,6 +71,7 @@ import io.cdap.cdap.spi.data.TableNotFoundException;
 import io.cdap.cdap.spi.data.table.field.Field;
 import io.cdap.cdap.spi.data.table.field.Fields;
 import io.cdap.cdap.spi.data.table.field.Range;
+import io.cdap.cdap.spi.data.table.options.StaleReadOption;
 import io.cdap.cdap.store.StoreDefinition;
 import java.io.IOException;
 import java.io.StringReader;
@@ -150,7 +155,18 @@ public class AppMetadataStore {
       .put(ProgramRunStatus.REJECTED, TYPE_RUN_RECORD_COMPLETED)
       .build();
 
+  private static final String TYPE_FLOW_CONTROL_LAUNCHING = "launching";
+  private static final String TYPE_FLOW_CONTROL_RUNNING = "running";
+  private static final String TYPE_FLOW_CONTROL_NONE = "";
+
+  // Program types controlled by flow-control mechanism.
+  private static final Set<ProgramType> CONTROL_FLOW_PROGRAM_TYPES = ImmutableSet.of(ProgramType.MAPREDUCE,
+      ProgramType.WORKFLOW,
+      ProgramType.SPARK,
+      ProgramType.WORKER);
+
   private final StructuredTableContext context;
+  private final boolean appSpecReductionEnabled;
   private StructuredTable applicationSpecificationTable;
   private StructuredTable applicationEditTable;
   private StructuredTable workflowNodeStateTable;
@@ -158,6 +174,8 @@ public class AppMetadataStore {
   private StructuredTable workflowsTable;
   private StructuredTable programCountsTable;
   private StructuredTable subscriberStateTable;
+  private StructuredTable pluginDataTable;
+  private StructuredTable universalPluginDataTable;
 
   /**
    * Static method for creating an instance of {@link AppMetadataStore}.
@@ -168,6 +186,8 @@ public class AppMetadataStore {
 
   private AppMetadataStore(StructuredTableContext context) {
     this.context = context;
+    this.appSpecReductionEnabled = AppMetaStore.APPSPEC_REDUCTION_SUPPORTED_STORAGE_PROVIDERS.contains(
+        context.getStorageProvider());
   }
 
   private StructuredTable getApplicationSpecificationTable() {
@@ -247,6 +267,29 @@ public class AppMetadataStore {
       throw new RuntimeException(e);
     }
     return subscriberStateTable;
+  }
+
+  @VisibleForTesting
+  StructuredTable getPluginDataTable() {
+    try {
+      if (pluginDataTable == null) {
+        pluginDataTable = context.getTable(StoreDefinition.ArtifactStore.PLUGIN_DATA_TABLE);
+      }
+    } catch (TableNotFoundException e) {
+      throw new RuntimeException(e);
+    }
+    return pluginDataTable;
+  }
+
+  private StructuredTable getUniversalPluginDataTable() {
+    try {
+      if (universalPluginDataTable == null) {
+        universalPluginDataTable = context.getTable(StoreDefinition.ArtifactStore.UNIV_PLUGIN_DATA_TABLE);
+      }
+    } catch (TableNotFoundException e) {
+      throw new RuntimeException(e);
+    }
+    return universalPluginDataTable;
   }
 
   /**
@@ -348,7 +391,8 @@ public class AppMetadataStore {
       boolean keepScanning = true;
       while (iterator.hasNext() && keepScanning && limit > 0) {
         StructuredRow row = iterator.next();
-        AppScanEntry scanEntry = new AppScanEntry(row);
+        AppScanEntry scanEntry = new AppScanEntry(row, getPluginDataTable(),
+            getUniversalPluginDataTable(), appSpecReductionEnabled);
         if (scanEntryPredicate.test(scanEntry)) {
           keepScanning = func.apply(scanEntry);
           limit--;
@@ -391,13 +435,29 @@ public class AppMetadataStore {
             Range.Bound.EXCLUSIVE),
         Range.create(fields, Range.Bound.EXCLUSIVE, null,
             Range.Bound.INCLUSIVE));
-    // Count the latest version of app,
-    // we treat latest=["true",null] as latest for backward compatibility.
+    return getApplicationSpecificationTable().count(ranges, createLatestFilterIndex());
+  }
+
+  /**
+   * Returns the number of applications in the given namespace.
+   *
+   * @param namespaceId namespace ID for which to count.
+   * @return the count of application in the namespace.
+   * @throws IOException if the count fails.
+   */
+  public long getNamespaceApplicationCount(NamespaceId namespaceId) throws IOException {
+    Collection<Range> ranges = ImmutableList.of(Range.singleton(
+        ImmutableList.of(Fields.stringField(StoreDefinition.AppMetadataStore.NAMESPACE_FIELD,
+            namespaceId.getNamespace()))));
+    return getApplicationSpecificationTable().count(ranges, createLatestFilterIndex());
+  }
+
+  private Collection<Field<?>> createLatestFilterIndex() {
+    // We treat latest=["true",null] as latest for backward compatibility.
     // Prior to 6.8, all versions of an application were returned in the list apps api, not just the latest version.
-    Collection<Field<?>> filterIndexes =
-        ImmutableList.of(Fields.booleanField(StoreDefinition.AppMetadataStore.LATEST_FIELD, null),
-            Fields.booleanField(StoreDefinition.AppMetadataStore.LATEST_FIELD, true));
-    return getApplicationSpecificationTable().count(ranges, filterIndexes);
+    return ImmutableList.of(
+        Fields.booleanField(StoreDefinition.AppMetadataStore.LATEST_FIELD, null),
+        Fields.booleanField(StoreDefinition.AppMetadataStore.LATEST_FIELD, true));
   }
 
   @Nullable
@@ -697,9 +757,16 @@ public class AppMetadataStore {
     }
 
     // Add a new version of the app
-    writeApplication(id.getNamespace(), id.getApplication(), id.getVersion(), appMeta.getSpec(),
-        appMeta.getChange(),
-        appMeta.getSourceControlMeta(), markAsLatest);
+    try {
+      writeApplication(id.getNamespace(), id.getApplication(), id.getVersion(), appMeta.getSpec(),
+          appMeta.getChange(),
+          appMeta.getSourceControlMeta(), markAsLatest);
+    } catch (FieldSizeLimitExceededException e) {
+      LOG.error("Application deployment failed: ", e);
+      throw new IllegalArgumentException(
+          "Application deployment failed as size exceeds the supported limit of " + e.getLimit()
+              + " characters");
+    }
     return getApplicationEditNumber(
         new ApplicationReference(id.getNamespaceId(), id.getApplication()));
   }
@@ -715,10 +782,10 @@ public class AppMetadataStore {
   void writeApplication(String namespaceId, String appId, String versionId,
       ApplicationSpecification spec, @Nullable ChangeDetail change,
       @Nullable SourceControlMeta sourceControlMeta, boolean markAsLatest) throws IOException {
+    ApplicationMeta meta = new ApplicationMeta(appId, spec, null, null);
+    String json = ApplicationMetaAdapter.toJson(meta, appSpecReductionEnabled);
     writeApplicationSerialized(namespaceId, appId, versionId,
-        GSON.toJson(
-            new ApplicationMeta(appId, spec, null, null)),
-        change, sourceControlMeta, markAsLatest);
+        json, change, sourceControlMeta, markAsLatest);
     updateApplicationEdit(namespaceId, appId);
   }
 
@@ -795,8 +862,9 @@ public class AppMetadataStore {
     }
     // creation time cannot be null  - will be written to app-spec but won't be added to table
     ApplicationMeta updated = new ApplicationMeta(existing.getId(), spec, null);
+    String json = ApplicationMetaAdapter.toJson(updated, appSpecReductionEnabled);
     updateApplicationSerialized(appId.getNamespace(), appId.getApplication(), appId.getVersion(),
-        GSON.toJson(updated));
+        json);
   }
 
   /**
@@ -898,11 +966,58 @@ public class AppMetadataStore {
       // Update the parent Workflow run record by adding node id and program run id in the properties
       Map<String, String> properties = new HashMap<>(record.getProperties());
       properties.put(workflowNodeId, programRunId.getRun());
-      writeToStructuredTableWithPrimaryKeys(
-          runRecordFields,
-          RunRecordDetail.builder(record).setProperties(properties).setSourceId(sourceId).build(),
-          getRunRecordsTable(), StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+      writeRunRecordWithPrimaryKeys(runRecordFields,
+          RunRecordDetail.builder(record).setProperties(properties).setSourceId(sourceId).build());
     }
+  }
+
+  /**
+   * Record that the program run is pending run.
+   *
+   * @param programRunId program run
+   *
+   * @return {@link RunRecordDetail} with status Pending.
+   */
+  @Nullable
+  public RunRecordDetail recordProgramPending(ProgramRunId programRunId, Map<String, String> runtimeArgs,
+      Map<String, String> systemArgs, @Nullable ArtifactId artifactId)
+      throws IOException {
+    long startTs = RunIds.getTime(programRunId.getRun(), TimeUnit.SECONDS);
+    if (startTs == -1L) {
+      throw new IllegalArgumentException(String.format(
+          "Provisioning state for program run that does not have a timestamp in the run id: '%s'", programRunId));
+    }
+
+    Optional<ProfileId> profileId = SystemArguments.getProfileIdFromArgs(
+        programRunId.getNamespaceId(), systemArgs);
+    RunRecordDetail existing = getRun(programRunId);
+
+    // If for some reason, there is an existing run record then return null.
+    if (existing != null) {
+      LOG.warn(
+          "Ignoring unexpected request to record pending state for program run {} that has an "
+              + "existing run record in run state {} and cluster state {}.",
+          programRunId, existing.getStatus());
+      return null;
+    }
+
+    ProgramRunCluster cluster = new ProgramRunCluster(ProgramRunClusterStatus.PROVISIONING, null, null);
+    RunRecordDetail meta = RunRecordDetail.builder()
+        .setProgramRunId(programRunId)
+        .setStartTime(startTs)
+        .setProperties(getRecordProperties(systemArgs, runtimeArgs))
+        .setSystemArgs(systemArgs)
+        .setCluster(cluster)
+        .setStatus(ProgramRunStatus.PENDING)
+        .setPeerName(systemArgs.get(ProgramOptionConstants.PEER_NAME))
+        .setArtifactId(artifactId)
+        .setPrincipal(systemArgs.get(ProgramOptionConstants.PRINCIPAL))
+        .setProfileId(profileId.orElse(null))
+        .setFlowControlStatus(getFlowControlStatus(programRunId, ProgramRunStatus.PENDING, systemArgs))
+        .build();
+    writeNewRunRecord(meta, TYPE_RUN_RECORD_ACTIVE);
+    LOG.trace("Recorded {} for program {}", ProgramRunStatus.PENDING, programRunId);
+    return meta;
   }
 
   /**
@@ -927,25 +1042,6 @@ public class AppMetadataStore {
       Map<String, String> systemArgs, byte[] sourceId,
       @Nullable ArtifactId artifactId)
       throws IOException {
-    long startTs = RunIds.getTime(programRunId.getRun(), TimeUnit.SECONDS);
-    if (startTs == -1L) {
-      LOG.error(
-          "Ignoring unexpected request to record provisioning state for program run {} that does not have "
-
-              + "a timestamp in the run id.", programRunId);
-      return null;
-    }
-
-    RunRecordDetail existing = getRun(programRunId);
-    // for some reason, there is an existing run record.
-    if (existing != null) {
-      LOG.error(
-          "Ignoring unexpected request to record provisioning state for program run {} that has an existing "
-              + "run record in run state {} and cluster state {}.",
-          programRunId, existing.getStatus(), existing.getCluster().getStatus());
-      return null;
-    }
-
     Optional<ProfileId> profileId = SystemArguments.getProfileIdFromArgs(
         programRunId.getNamespaceId(), systemArgs);
     if (!profileId.isPresent()) {
@@ -957,20 +1053,60 @@ public class AppMetadataStore {
 
     ProgramRunCluster cluster = new ProgramRunCluster(ProgramRunClusterStatus.PROVISIONING, null,
         null);
-    RunRecordDetail meta = RunRecordDetail.builder()
-        .setProgramRunId(programRunId)
-        .setStartTime(startTs)
-        .setStatus(ProgramRunStatus.PENDING)
-        .setProperties(getRecordProperties(systemArgs, runtimeArgs))
-        .setSystemArgs(systemArgs)
-        .setCluster(cluster)
-        .setProfileId(profileId.get())
-        .setPeerName(systemArgs.get(ProgramOptionConstants.PEER_NAME))
-        .setSourceId(sourceId)
-        .setArtifactId(artifactId)
-        .setPrincipal(systemArgs.get(ProgramOptionConstants.PRINCIPAL))
-        .build();
-    writeNewRunRecord(meta, TYPE_RUN_RECORD_ACTIVE);
+
+    RunRecordDetail existing = getRun(programRunId);
+    RunRecordDetail meta;
+    if (existing == null) {
+      // Create a new run record if it doesn't exist.
+      long startTs = RunIds.getTime(programRunId.getRun(), TimeUnit.SECONDS);
+      if (startTs == -1L) {
+        LOG.error(
+            "Ignoring unexpected request to record provisioning state for program run {} that does not have "
+
+                + "a timestamp in the run id.", programRunId);
+        return null;
+      }
+      meta = RunRecordDetail.builder()
+          .setProgramRunId(programRunId)
+          .setStartTime(startTs)
+          .setStatus(ProgramRunStatus.PENDING)
+          .setProperties(getRecordProperties(systemArgs, runtimeArgs))
+          .setSystemArgs(systemArgs)
+          .setCluster(cluster)
+          .setProfileId(profileId.get())
+          .setPeerName(systemArgs.get(ProgramOptionConstants.PEER_NAME))
+          .setSourceId(sourceId)
+          .setArtifactId(artifactId)
+          .setPrincipal(systemArgs.get(ProgramOptionConstants.PRINCIPAL))
+          .setFlowControlStatus(getFlowControlStatus(programRunId, ProgramRunStatus.PENDING, systemArgs))
+          .build();
+      writeNewRunRecord(meta, TYPE_RUN_RECORD_ACTIVE);
+    } else {
+      if (existing.getStatus() != ProgramRunStatus.PENDING && existing.getStatus() != ProgramRunStatus.SUSPENDED) {
+        LOG.error(
+            "Ignoring unexpected request to record provisioning state for program run {} that has "
+                + "a status in end state {}.", programRunId, existing.getStatus());
+        return null;
+      }
+      delete(existing);
+      meta = RunRecordDetail.builder(existing)
+          .setStatus(ProgramRunStatus.PENDING)
+          .setProperties(getRecordProperties(systemArgs, runtimeArgs))
+          .setSystemArgs(systemArgs)
+          .setCluster(cluster)
+          .setProfileId(profileId.get())
+          .setPeerName(systemArgs.get(ProgramOptionConstants.PEER_NAME))
+          .setSourceId(sourceId)
+          .setArtifactId(artifactId)
+          .setPrincipal(systemArgs.get(ProgramOptionConstants.PRINCIPAL))
+          .setFlowControlStatus(getFlowControlStatus(programRunId, ProgramRunStatus.PENDING, systemArgs))
+          .build();
+      List<Field<?>> key = getProgramRunInvertedTimeKey(TYPE_RUN_RECORD_ACTIVE,
+          existing.getProgramRunId(),
+          existing.getStartTs());
+      writeRunRecordWithPrimaryKeys(key, meta);
+    }
+
     LOG.trace("Recorded {} for program {}", ProgramRunClusterStatus.PROVISIONING, programRunId);
     return meta;
   }
@@ -1031,8 +1167,7 @@ public class AppMetadataStore {
         .setCluster(cluster)
         .setSourceId(sourceId)
         .build();
-    writeToStructuredTableWithPrimaryKeys(
-        key, meta, getRunRecordsTable(), StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+    writeRunRecordWithPrimaryKeys(key, meta);
     LOG.trace("Recorded {} for program {}", ProgramRunClusterStatus.PROVISIONED,
         existing.getProgramRunId());
     return meta;
@@ -1076,8 +1211,7 @@ public class AppMetadataStore {
         .setCluster(cluster)
         .setSourceId(sourceId)
         .build();
-    writeToStructuredTableWithPrimaryKeys(
-        key, meta, getRunRecordsTable(), StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+    writeRunRecordWithPrimaryKeys(key, meta);
     LOG.trace("Recorded {} for program {}", ProgramRunClusterStatus.DEPROVISIONING,
         existing.getProgramRunId());
     return meta;
@@ -1122,8 +1256,7 @@ public class AppMetadataStore {
         .setCluster(cluster)
         .setSourceId(sourceId)
         .build();
-    writeToStructuredTableWithPrimaryKeys(
-        key, meta, getRunRecordsTable(), StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+    writeRunRecordWithPrimaryKeys(key, meta);
     LOG.trace("Recorded {} for program {}", ProgramRunClusterStatus.DEPROVISIONED,
         existing.getProgramRunId());
     return meta;
@@ -1167,10 +1300,9 @@ public class AppMetadataStore {
         .setCluster(cluster)
         .setSourceId(sourceId)
         .build();
-    writeToStructuredTableWithPrimaryKeys(
-        key, meta, getRunRecordsTable(), StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+    writeRunRecordWithPrimaryKeys(key, meta);
     LOG.trace("Recorded {} for program {}", ProgramRunClusterStatus.ORPHANED,
-        existing.getProgramRunId());
+        meta.getProgramRunId());
     return meta;
   }
 
@@ -1179,32 +1311,30 @@ public class AppMetadataStore {
       Map<String, String> runtimeArgs, Map<String, String> systemArgs,
       byte[] sourceId, @Nullable ArtifactId artifactId)
       throws IOException {
-    long startTs = RunIds.getTime(programRunId.getRun(), TimeUnit.SECONDS);
-    if (startTs == -1L) {
-      LOG.error(
-          "Ignoring unexpected request to record provisioning state for program run {} that does not have "
-
-              + "a timestamp in the run id.", programRunId);
-      return null;
-    }
-
     RunRecordDetail existing = getRun(programRunId);
-    // for some reason, there is an existing run record?
-    if (existing != null) {
-      LOG.error(
-          "Ignoring unexpected request to record rejected state for program run {} that has an existing "
-              + "run record in run state {} and cluster state {}.",
-          programRunId, existing.getStatus(), existing.getCluster().getStatus());
-      return null;
+
+    RunRecordDetail.Builder builder;
+    if (existing == null) {
+      LOG.warn(
+          "Unexpected request to record rejected state for program run {} that has no existing run record.",
+          programRunId);
+      long startTs = RunIds.getTime(programRunId.getRun(), TimeUnit.SECONDS);
+      if (startTs == -1L) {
+        LOG.error(
+            "Ignoring unexpected request to record provisioning state for program run {} that does not have "
+
+                + "a timestamp in the run id.", programRunId);
+        return null;
+      }
+      builder = RunRecordDetail.builder().setProgramRunId(programRunId).setStartTime(startTs).setStopTime(startTs);
+    } else {
+      delete(existing);
+      builder = RunRecordDetail.builder(existing).setStopTime(existing.getStartTs());
     }
 
     Optional<ProfileId> profileId = SystemArguments.getProfileIdFromArgs(
         programRunId.getNamespaceId(), systemArgs);
-    RunRecordDetail meta = RunRecordDetail.builder()
-        .setProgramRunId(programRunId)
-        .setStartTime(startTs)
-        .setStopTime(startTs) // rejected: stop time == start time
-        .setStatus(ProgramRunStatus.REJECTED)
+    RunRecordDetail meta = builder.setStatus(ProgramRunStatus.REJECTED)
         .setProperties(getRecordProperties(systemArgs, runtimeArgs))
         .setSystemArgs(systemArgs)
         .setProfileId(profileId.orElse(null))
@@ -1212,9 +1342,13 @@ public class AppMetadataStore {
         .setArtifactId(artifactId)
         .setSourceId(sourceId)
         .setPrincipal(systemArgs.get(ProgramOptionConstants.PRINCIPAL))
+        .setFlowControlStatus(getFlowControlStatus(programRunId, ProgramRunStatus.REJECTED, systemArgs))
         .build();
 
-    writeNewRunRecord(meta, TYPE_RUN_RECORD_COMPLETED);
+    List<Field<?>> key = getProgramRunInvertedTimeKey(TYPE_RUN_RECORD_COMPLETED,
+        meta.getProgramRunId(),
+        meta.getStartTs());
+    writeRunRecordWithPrimaryKeys(key, meta);
     LOG.trace("Recorded {} for program {}", ProgramRunStatus.REJECTED, programRunId);
     return meta;
   }
@@ -1226,8 +1360,7 @@ public class AppMetadataStore {
       throws IOException {
     List<Field<?>> fields = getProgramRunInvertedTimeKey(typeRunRecordCompleted,
         meta.getProgramRunId(), meta.getStartTs());
-    writeToStructuredTableWithPrimaryKeys(fields, meta, getRunRecordsTable(),
-        StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+    writeRunRecordWithPrimaryKeys(fields, meta);
     List<Field<?>> countKey = getProgramCountPrimaryKeys(TYPE_COUNT,
         meta.getProgramRunId().getParent());
     getProgramCountsTable().increment(countKey, StoreDefinition.AppMetadataStore.COUNTS, 1L);
@@ -1280,9 +1413,9 @@ public class AppMetadataStore {
         .setSystemArgs(newSystemArgs)
         .setTwillRunId(twillRunId)
         .setSourceId(sourceId)
+        .setFlowControlStatus(getFlowControlStatus(programRunId, ProgramRunStatus.STARTING, newSystemArgs))
         .build();
-    writeToStructuredTableWithPrimaryKeys(
-        key, meta, getRunRecordsTable(), StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+    writeRunRecordWithPrimaryKeys(key, meta);
     LOG.trace("Recorded {} for program {}", ProgramRunStatus.STARTING, existing.getProgramRunId());
     return meta;
   }
@@ -1333,9 +1466,9 @@ public class AppMetadataStore {
         .setStatus(ProgramRunStatus.RUNNING)
         .setTwillRunId(twillRunId)
         .setSourceId(sourceId)
+        .setFlowControlStatus(getFlowControlStatus(programRunId, ProgramRunStatus.RUNNING, systemArgs))
         .build();
-    writeToStructuredTableWithPrimaryKeys(
-        key, meta, getRunRecordsTable(), StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+    writeRunRecordWithPrimaryKeys(key, meta);
     LOG.trace("Recorded {} for program {}", ProgramRunStatus.RUNNING, existing.getProgramRunId());
     return meta;
   }
@@ -1410,7 +1543,9 @@ public class AppMetadataStore {
     List<Field<?>> key = getProgramRunInvertedTimeKey(TYPE_RUN_RECORD_ACTIVE,
         existing.getProgramRunId(),
         existing.getStartTs());
-    RunRecordDetail.Builder builder = RunRecordDetail.builder(existing).setStatus(toStatus)
+    RunRecordDetail.Builder builder = RunRecordDetail.builder(existing)
+        .setStatus(toStatus)
+        .setFlowControlStatus(getFlowControlStatus(existing.getProgramRunId(), toStatus, existing.getSystemArgs()))
         .setSourceId(sourceId);
     if (timestamp != -1) {
       if (action.equals("resume")) {
@@ -1420,8 +1555,7 @@ public class AppMetadataStore {
       }
     }
     RunRecordDetail meta = builder.build();
-    writeToStructuredTableWithPrimaryKeys(
-        key, meta, getRunRecordsTable(), StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+    writeRunRecordWithPrimaryKeys(key, meta);
     LOG.trace("Recorded {} for program {}", toStatus, existing.getProgramRunId());
     return meta;
   }
@@ -1475,9 +1609,9 @@ public class AppMetadataStore {
         .setStoppingTime(stoppingTsSecs)
         .setTerminateTs(terminateTsSecs)
         .setSourceId(sourceId)
+        .setFlowControlStatus(getFlowControlStatus(programRunId, ProgramRunStatus.STOPPING, systemArgs))
         .build();
-    writeToStructuredTableWithPrimaryKeys(
-        key, meta, getRunRecordsTable(), StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+    writeRunRecordWithPrimaryKeys(key, meta);
     LOG.trace("Recorded {} for program {}", ProgramRunStatus.STOPPING, existing.getProgramRunId());
     return meta;
   }
@@ -1529,9 +1663,9 @@ public class AppMetadataStore {
         .setStopTime(stopTs)
         .setStatus(runStatus)
         .setSourceId(sourceId)
+        .setFlowControlStatus(getFlowControlStatus(programRunId, runStatus, systemArgs))
         .build();
-    writeToStructuredTableWithPrimaryKeys(
-        key, meta, getRunRecordsTable(), StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+    writeRunRecordWithPrimaryKeys(key, meta);
     LOG.trace("Recorded {} for program {}", runStatus, existing.getProgramRunId());
     return meta;
   }
@@ -1641,6 +1775,38 @@ public class AppMetadataStore {
       iterator.forEachRemaining(m -> count.getAndIncrement());
     }
     return count.get();
+  }
+
+  /**
+   * Count all records in launching state.
+   *
+   * @return Count of records in launching state.
+   */
+  public int getFlowControlLaunchingCount(int readStalenessSeconds) throws IOException {
+    ImmutableList<Field<?>> keyPrefix = ImmutableList.of(
+        Fields.stringField(StoreDefinition.AppMetadataStore.RUN_STATUS, TYPE_RUN_RECORD_ACTIVE));
+    Collection<Field<?>> filterIndexes =
+        ImmutableList.of(
+            Fields.stringField(StoreDefinition.AppMetadataStore.FLOW_CONTROL_STATUS,
+                TYPE_FLOW_CONTROL_LAUNCHING));
+    return (int) getRunRecordsTable().count(Collections.singletonList(Range.singleton(keyPrefix)),
+        filterIndexes, new StaleReadOption(readStalenessSeconds));
+  }
+
+  /**
+   * Count all records in running state.
+   *
+   * @return Count of records in running state.
+   */
+  public int getFlowControlRunningCount(int readStalenessSeconds) throws IOException {
+    ImmutableList<Field<?>> keyPrefix = ImmutableList.of(
+        Fields.stringField(StoreDefinition.AppMetadataStore.RUN_STATUS, TYPE_RUN_RECORD_ACTIVE));
+    Collection<Field<?>> filterIndexes =
+        ImmutableList.of(
+            Fields.stringField(StoreDefinition.AppMetadataStore.FLOW_CONTROL_STATUS,
+                TYPE_FLOW_CONTROL_RUNNING));
+    return (int) getRunRecordsTable().count(Collections.singletonList(Range.singleton(keyPrefix)),
+        filterIndexes, new StaleReadOption(readStalenessSeconds));
   }
 
   /**
@@ -2519,6 +2685,7 @@ public class AppMetadataStore {
     deleteTable(getProgramCountsTable(), StoreDefinition.AppMetadataStore.COUNT_TYPE);
     deleteTable(getSubscriberStateTable(), StoreDefinition.AppMetadataStore.SUBSCRIBER_TOPIC);
     deleteTable(getApplicationEditTable(), StoreDefinition.AppMetadataStore.NAMESPACE_FIELD);
+    deleteTable(getPluginDataTable(), StoreDefinition.ArtifactStore.PARENT_NAMESPACE_FIELD);
   }
 
   private void deleteTable(StructuredTable table, String firstKey) throws IOException {
@@ -2703,9 +2870,12 @@ public class AppMetadataStore {
     String changeSummary = row.getString(StoreDefinition.AppMetadataStore.CHANGE_SUMMARY_FIELD);
     Long creationTimeMillis = row.getLong(StoreDefinition.AppMetadataStore.CREATION_TIME_FIELD);
     Boolean latest = row.getBoolean(StoreDefinition.AppMetadataStore.LATEST_FIELD);
-    ApplicationMeta meta = GSON.fromJson(
+    String namespace = row.getString(StoreDefinition.AppMetadataStore.NAMESPACE_FIELD);
+
+    ApplicationMeta meta = ApplicationMetaAdapter.fromJson(
         row.getString(StoreDefinition.AppMetadataStore.APPLICATION_DATA_FIELD),
-        ApplicationMeta.class);
+        ApplicationMeta.class, namespace, appSpecReductionEnabled,
+        getPluginDataTable(), getUniversalPluginDataTable());
     SourceControlMeta sourceControl = GSON.fromJson(
         row.getString(StoreDefinition.AppMetadataStore.SOURCE_CONTROL_META),
         SourceControlMeta.class);
@@ -2778,7 +2948,7 @@ public class AppMetadataStore {
     return getRunRecordProgramPrefix(status, programId.getProgramReference(),
         programId.getVersion());
   }
-  
+
   private List<Field<?>> getRunRecordProgramPrefix(String status,
       @Nullable ProgramReference programRef, @Nullable String version) {
     List<Field<?>> fields = getRunRecordStatusPrefix(status);
@@ -2920,6 +3090,33 @@ public class AppMetadataStore {
             row.getString(StoreDefinition.AppMetadataStore.VERSION_FIELD));
   }
 
+  private String getFlowControlStatus(ProgramRunId programRunId, ProgramRunStatus runStatus,
+      Map<String, String> systemArgs) {
+    if (!CONTROL_FLOW_PROGRAM_TYPES.contains(programRunId.getType())) {
+      return TYPE_FLOW_CONTROL_NONE;
+    }
+    if (NamespaceId.SYSTEM.getNamespace().equals(programRunId.getParent().getNamespace())) {
+      return TYPE_FLOW_CONTROL_NONE;
+    }
+    if (systemArgs.containsKey(ProgramOptionConstants.WORKFLOW_NAME)) {
+      return TYPE_FLOW_CONTROL_NONE;
+    }
+    if (runStatus == ProgramRunStatus.RUNNING) {
+      return TYPE_FLOW_CONTROL_RUNNING;
+    }
+    if (runStatus == ProgramRunStatus.PENDING || runStatus == ProgramRunStatus.STARTING) {
+      return TYPE_FLOW_CONTROL_LAUNCHING;
+    }
+
+    return TYPE_FLOW_CONTROL_NONE;
+  }
+
+  private void writeRunRecordWithPrimaryKeys(List<Field<?>> key, RunRecordDetail meta) throws IOException {
+    key.add(Fields.stringField(StoreDefinition.AppMetadataStore.FLOW_CONTROL_STATUS, meta.getFlowControlStatus()));
+    writeToStructuredTableWithPrimaryKeys(
+        key, meta, getRunRecordsTable(), StoreDefinition.AppMetadataStore.RUN_RECORD_DATA);
+  }
+
   /**
    * Represents a position for scanning.
    */
@@ -2945,9 +3142,16 @@ public class AppMetadataStore {
     private final ChangeDetail changeDetail;
     @Nullable
     private final SourceControlMeta sourceControlMeta;
+    private final StructuredTable pluginDataTable;
+    private final StructuredTable universalPluginDataTable;
+    private final boolean appSpecReductionEnabled;
 
-    private AppScanEntry(StructuredRow row) {
+    private AppScanEntry(StructuredRow row, StructuredTable pluginDataTable,
+        StructuredTable universalPluginDataTable, boolean appSpecReductionEnabled) {
       this.appId = getApplicationIdFromRow(row);
+      this.pluginDataTable = pluginDataTable;
+      this.universalPluginDataTable = universalPluginDataTable;
+      this.appSpecReductionEnabled = appSpecReductionEnabled;
       this.rawAppMeta = row.getString(StoreDefinition.AppMetadataStore.APPLICATION_DATA_FIELD);
       String author = row.getString(StoreDefinition.AppMetadataStore.AUTHOR_FIELD);
       String changeSummary = row.getString(StoreDefinition.AppMetadataStore.CHANGE_SUMMARY_FIELD);
@@ -2976,7 +3180,9 @@ public class AppMetadataStore {
       if (meta != null) {
         return meta;
       }
-      ApplicationMeta tempMeta = GSON.fromJson(rawAppMeta, ApplicationMeta.class);
+      ApplicationMeta tempMeta = ApplicationMetaAdapter.fromJson(
+          rawAppMeta, ApplicationMeta.class, appId.getNamespace(),
+          appSpecReductionEnabled, pluginDataTable, universalPluginDataTable);
       appMeta = meta = new ApplicationMeta(tempMeta.getId(), tempMeta.getSpec(), changeDetail,
           sourceControlMeta);
       return meta;

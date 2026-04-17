@@ -35,8 +35,10 @@ import io.cdap.cdap.app.runtime.spark.distributed.SparkContainerLauncher;
 import io.cdap.cdap.app.runtime.spark.service.ArtifactFetcherService;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.IOModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.guice.SupplierProviderBridge;
 import io.cdap.cdap.common.http.CommonNettyHttpServiceFactory;
@@ -52,7 +54,7 @@ import io.cdap.cdap.logging.guice.RemoteLogAppenderModule;
 import io.cdap.cdap.master.environment.MasterEnvironments;
 import io.cdap.cdap.master.spi.environment.MasterEnvironment;
 import io.cdap.cdap.master.spi.environment.MasterEnvironmentContext;
-import io.cdap.cdap.messaging.guice.MessagingClientModule;
+import io.cdap.cdap.messaging.guice.client.DefaultMessagingClientModule;
 import io.cdap.cdap.metrics.guice.MetricsClientRuntimeModule;
 import io.cdap.cdap.proto.id.ProgramId;
 import io.cdap.cdap.security.auth.context.AuthenticationContextModules;
@@ -258,8 +260,11 @@ public class SparkContainerDriverLauncher {
     modules.add(new IOModule());
     modules.add(new AuthenticationContextModules().getMasterWorkerModule());
     modules.add(coreSecurityModule);
-    modules.add(new MessagingClientModule());
+    modules.add(new DefaultMessagingClientModule());
     modules.add(new MetricsClientRuntimeModule().getDistributedModules());
+    //Need for guice binding, but No Audit Log action required.
+    modules.add(new NoOpAuditLogModule());
+    modules.add(new UserCredentialAeadEncryptionModule());
 
     modules.add(new AbstractModule() {
       @Override

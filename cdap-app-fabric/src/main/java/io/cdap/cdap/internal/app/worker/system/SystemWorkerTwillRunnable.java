@@ -33,12 +33,14 @@ import com.google.inject.util.Modules;
 import io.cdap.cdap.api.artifact.ArtifactManager;
 import io.cdap.cdap.api.metrics.MetricsCollectionService;
 import io.cdap.cdap.app.guice.AppFabricServiceRuntimeModule;
+import io.cdap.cdap.app.guice.AuditLogWriterModule;
 import io.cdap.cdap.app.guice.AuthorizationModule;
 import io.cdap.cdap.app.guice.DistributedArtifactManagerModule;
 import io.cdap.cdap.app.guice.ProgramRunnerRuntimeModule;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.conf.SConfiguration;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.DFSLocationModule;
 import io.cdap.cdap.common.guice.IOModule;
@@ -154,7 +156,10 @@ public class SystemWorkerTwillRunnable extends AbstractTwillRunnable {
         new MessagingServiceModule(cConf),
         new AuthorizationModule(),
         new AuthorizationEnforcementModule().getMasterModule(),
-        Modules.override(new AppFabricServiceRuntimeModule(cConf).getDistributedModules())
+        new AuditLogWriterModule(cConf).getDistributedModules(),
+        new UserCredentialAeadEncryptionModule(),
+        Modules.override(new AppFabricServiceRuntimeModule(cConf, AppFabricServiceRuntimeModule.ALL_SERVICE_TYPES)
+            .getDistributedModules())
             .with(new AbstractModule() {
               // To enable localisation of artifacts
               @Override

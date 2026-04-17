@@ -53,6 +53,7 @@ import io.cdap.cdap.internal.app.deploy.pipeline.AppDeploymentInfo;
 import io.cdap.cdap.internal.app.deploy.pipeline.ApplicationWithPrograms;
 import io.cdap.cdap.internal.app.runtime.SystemArguments;
 import io.cdap.cdap.internal.app.runtime.artifact.ArtifactRepository;
+import io.cdap.cdap.internal.app.runtime.schedule.ScheduleManager;
 import io.cdap.cdap.internal.app.services.ApplicationLifecycleService;
 import io.cdap.cdap.internal.app.services.http.AppFabricTestBase;
 import io.cdap.cdap.internal.app.store.state.AppStateKey;
@@ -75,7 +76,6 @@ import io.cdap.cdap.proto.id.ProfileId;
 import io.cdap.cdap.proto.id.ProgramId;
 import io.cdap.cdap.proto.id.ProgramReference;
 import io.cdap.cdap.proto.profile.Profile;
-import io.cdap.cdap.scheduler.Scheduler;
 import io.cdap.cdap.security.impersonation.CurrentUGIProvider;
 import io.cdap.cdap.security.impersonation.Impersonator;
 import io.cdap.cdap.security.impersonation.OwnerAdmin;
@@ -112,6 +112,7 @@ public class AppLifecycleHttpHandlerTest extends AppFabricTestBase {
   @BeforeClass
   public static void beforeClass() throws Throwable {
     cConf = createBasicCconf();
+    cConf.set(Constants.GET_APPS_DEFAULT_PAGE_SIZE, "4");
     initializeAndStartServices(cConf);
   }
 
@@ -135,7 +136,7 @@ public class AppLifecycleHttpHandlerTest extends AppFabricTestBase {
       @Provides
       @Singleton
       public ApplicationLifecycleService createLifeCycleService(CConfiguration cConf,
-          Store store, Scheduler scheduler, UsageRegistry usageRegistry,
+          Store store, ScheduleManager scheduleManager, UsageRegistry usageRegistry,
           PreferencesService preferencesService, MetricsSystemClient metricsSystemClient,
           OwnerAdmin ownerAdmin, ArtifactRepository artifactRepository,
           ManagerFactory<AppDeploymentInfo, ApplicationWithPrograms> managerFactory,
@@ -144,7 +145,7 @@ public class AppLifecycleHttpHandlerTest extends AppFabricTestBase {
           MessagingService messagingService, Impersonator impersonator,
           CapabilityReader capabilityReader) {
 
-        return Mockito.spy(new ApplicationLifecycleService(cConf, store, scheduler,
+        return Mockito.spy(new ApplicationLifecycleService(cConf, store, scheduleManager,
             usageRegistry, preferencesService, metricsSystemClient, ownerAdmin, artifactRepository,
             managerFactory, metadataServiceClient, accessEnforcer, authenticationContext,
             messagingService, impersonator, capabilityReader, new NoOpMetricsCollectionService()));
@@ -687,6 +688,107 @@ public class AppLifecycleHttpHandlerTest extends AppFabricTestBase {
   }
 
   @Test
+  public void testListAppsWithDefaultPaginationEnabled() throws Exception {
+    for (int i = 0; i < 10; i++) {
+      // deploy with name to testnamespace1
+      String ns1AppName = AllProgramsApp.NAME + i;
+      Id.Namespace ns1 = Id.Namespace.from(TEST_NAMESPACE1);
+      Id.Artifact ns1ArtifactId = Id.Artifact.from(ns1, AllProgramsApp.class.getSimpleName(),
+          "1.0.0-SNAPSHOT");
+
+      HttpResponse response = addAppArtifact(ns1ArtifactId, AllProgramsApp.class);
+      Assert.assertEquals(200, response.getResponseCode());
+      Id.Application appId = Id.Application.from(ns1, ns1AppName);
+      response = deploy(appId,
+          new AppRequest<>(ArtifactSummary.from(ns1ArtifactId.toArtifactId())));
+      Assert.assertEquals(200, response.getResponseCode());
+    }
+
+    int count = 0;
+    String token = null;
+    boolean isLastPage = false;
+    boolean emptyListReceived = false;
+
+    while (!isLastPage) {
+      JsonObject result = getAppListForPaginatedApi(TEST_NAMESPACE1, null, token, null, null, null, null, true);
+      int currentResultSize = result.get("applications").getAsJsonArray().size();
+      count += currentResultSize;
+      emptyListReceived = (currentResultSize == 0);
+      token = result.get("nextPageToken") == null ? null : result.get("nextPageToken").getAsString();
+      isLastPage = (token == null);
+      if (isLastPage) {
+        Assert.assertEquals(2, currentResultSize);
+      }
+      else {
+        Assert.assertEquals(4, currentResultSize);
+      }
+    }
+    Assert.assertEquals(10, count);
+    Assert.assertFalse(emptyListReceived);
+
+    HttpResponse response = doDelete(getVersionedApiPath("apps/",
+        Constants.Gateway.API_VERSION_3_TOKEN, TEST_NAMESPACE1));
+    Assert.assertEquals(200, response.getResponseCode());
+    List<JsonObject> apps = getAppList(TEST_NAMESPACE1);
+    Assert.assertEquals(0, apps.size());
+  }
+
+  @Test
+  public void testListAppsWithDefaultPaginationDisabled() throws Exception {
+    for (int i = 0; i < 10; i++) {
+      String ns1AppName = AllProgramsApp.NAME + i;
+      Id.Namespace ns1 = Id.Namespace.from(TEST_NAMESPACE1);
+      Id.Artifact ns1ArtifactId = Id.Artifact.from(ns1, AllProgramsApp.class.getSimpleName(),
+          "1.0.0-SNAPSHOT");
+
+      HttpResponse response = addAppArtifact(ns1ArtifactId, AllProgramsApp.class);
+      Assert.assertEquals(200, response.getResponseCode());
+      Id.Application appId = Id.Application.from(ns1, ns1AppName);
+      response = deploy(appId,
+          new AppRequest<>(ArtifactSummary.from(ns1ArtifactId.toArtifactId())));
+      Assert.assertEquals(200, response.getResponseCode());
+    }
+
+    List<JsonObject> result = getAppListForDefaultPaginationDisabledApi(TEST_NAMESPACE1, false);
+    int resultSize = result.size();
+    Assert.assertEquals(10, resultSize);
+
+    HttpResponse response = doDelete(getVersionedApiPath("apps/",
+        Constants.Gateway.API_VERSION_3_TOKEN, TEST_NAMESPACE1));
+    Assert.assertEquals(200, response.getResponseCode());
+    List<JsonObject> apps = getAppList(TEST_NAMESPACE1);
+    Assert.assertEquals(0, apps.size());
+  }
+
+  @Test
+  public void testListAppsWithNegativePageSize() throws Exception {
+    for (int i = 0; i < 10; i++) {
+      String ns1AppName = AllProgramsApp.NAME + i;
+      Id.Namespace ns1 = Id.Namespace.from(TEST_NAMESPACE1);
+      Id.Artifact ns1ArtifactId = Id.Artifact.from(ns1, AllProgramsApp.class.getSimpleName(),
+          "1.0.0-SNAPSHOT");
+
+      HttpResponse response = addAppArtifact(ns1ArtifactId, AllProgramsApp.class);
+      Assert.assertEquals(200, response.getResponseCode());
+      Id.Application appId = Id.Application.from(ns1, ns1AppName);
+      response = deploy(appId,
+          new AppRequest<>(ArtifactSummary.from(ns1ArtifactId.toArtifactId())));
+      Assert.assertEquals(200, response.getResponseCode());
+    }
+
+    List<JsonObject> result = getAppListForNegativePaginatedApi(TEST_NAMESPACE1, -3);
+    int resultSize = result.size();
+    Assert.assertEquals(10, resultSize);
+
+    // delete the apps in testnamespace1
+    HttpResponse response = doDelete(getVersionedApiPath("apps/",
+        Constants.Gateway.API_VERSION_3_TOKEN, TEST_NAMESPACE1));
+    Assert.assertEquals(200, response.getResponseCode());
+    List<JsonObject> apps = getAppList(TEST_NAMESPACE1);
+    Assert.assertEquals(0, apps.size());
+  }
+
+  @Test
   public void testListAndGetForPaginatedAPIWithEmptyLastPage() throws Exception {
     for (int i = 0; i < 9; i++) {
       //deploy with name to testnamespace1
@@ -793,17 +895,18 @@ public class AppLifecycleHttpHandlerTest extends AppFabricTestBase {
     String token = null;
     JsonObject result = getAppListForPaginatedApi(TEST_NAMESPACE1, 3, token,
                                                   AllProgramsApp.NAME.toUpperCase(Locale.ROOT),
-                                                  "EQUALS", null, null);
+                                                  "EQUALS", null, null, false);
     int currentResultSize = result.get("applications").getAsJsonArray().size();
     Assert.assertEquals(0, currentResultSize);
 
     JsonObject result1 = getAppListForPaginatedApi(TEST_NAMESPACE1, 3, token,
                                                    AllProgramsApp.NAME.toUpperCase(Locale.ROOT),
-                                                  "EQUALS_IGNORE_CASE", null, null);
+                                                  "EQUALS_IGNORE_CASE", null, null, false);
     int currentResultSize1 = result1.get("applications").getAsJsonArray().size();
     Assert.assertEquals(1, currentResultSize1);
 
-    JsonObject result2 = getAppListForPaginatedApi(TEST_NAMESPACE1, 3, token, AllProgramsApp.NAME, null, null, null);
+    JsonObject result2 = getAppListForPaginatedApi(TEST_NAMESPACE1, 3, token, AllProgramsApp.NAME,
+        null, null, null, false);
     int currentResultSize2 = result2.get("applications").getAsJsonArray().size();
     Assert.assertEquals(2, currentResultSize2);
 
@@ -851,7 +954,8 @@ public class AppLifecycleHttpHandlerTest extends AppFabricTestBase {
     boolean isLastPage = false;
     int currentResultSize = 0;
     while (!isLastPage) {
-      JsonObject result = getAppListForPaginatedApi(TEST_NAMESPACE1, 3, token, AllProgramsApp.NAME, null, true, null);
+      JsonObject result = getAppListForPaginatedApi(TEST_NAMESPACE1, 3, token,
+          AllProgramsApp.NAME, null, true, null, false);
       currentResultSize = result.get("applications").getAsJsonArray().size();
       count += currentResultSize;
       token = result.get("nextPageToken") == null ? null : result.get("nextPageToken").getAsString();
@@ -865,7 +969,8 @@ public class AppLifecycleHttpHandlerTest extends AppFabricTestBase {
     isLastPage = false;
     currentResultSize = 0;
     while (!isLastPage) {
-      JsonObject result = getAppListForPaginatedApi(TEST_NAMESPACE1, 3, token, AllProgramsApp.NAME, null, false, null);
+      JsonObject result = getAppListForPaginatedApi(TEST_NAMESPACE1, 3, token,
+          AllProgramsApp.NAME, null, false, null, false);
       currentResultSize = result.get("applications").getAsJsonArray().size();
       count += currentResultSize;
       token = result.get("nextPageToken") == null ? null : result.get("nextPageToken").getAsString();
@@ -903,7 +1008,8 @@ public class AppLifecycleHttpHandlerTest extends AppFabricTestBase {
     boolean isLastPage = false;
     int currentResultSize = 0;
     while (!isLastPage) {
-      JsonObject result = getAppListForPaginatedApi(TEST_NAMESPACE1, 3, token, AllProgramsApp.NAME, null, true, null);
+      JsonObject result = getAppListForPaginatedApi(TEST_NAMESPACE1, 3, token,
+          AllProgramsApp.NAME, null, true, null, false);
       currentResultSize = result.get("applications").getAsJsonArray().size();
       count += currentResultSize;
       token = result.get("nextPageToken") == null ? null : result.get("nextPageToken").getAsString();
@@ -919,7 +1025,7 @@ public class AppLifecycleHttpHandlerTest extends AppFabricTestBase {
     List<Long> creationTimeList = new ArrayList<>();
     while (!isLastPage) {
       JsonObject result = getAppListForPaginatedApi(TEST_NAMESPACE1, 3, token,
-                                                    "DESC", AllProgramsApp.NAME, "EQUALS", false, true);
+                                                    "DESC", AllProgramsApp.NAME, "EQUALS", false, true, false);
       currentResultSize = result.get("applications").getAsJsonArray().size();
       count += currentResultSize;
       token = result.get("nextPageToken") == null ? null : result.get("nextPageToken").getAsString();
@@ -1486,6 +1592,33 @@ public class AppLifecycleHttpHandlerTest extends AppFabricTestBase {
                                       appDetails.getAppVersion());
     deleteApp(defaultAppId, 200);
     deleteArtifact(artifactId, 200);
+  }
+
+  @Test
+  public void testGetApplicationCount() throws Exception {
+    for (int i = 0; i < 10; i++) {
+      String ns1AppName = AllProgramsApp.NAME + i;
+      Id.Namespace ns1 = Id.Namespace.from(TEST_NAMESPACE1);
+      Id.Artifact ns1ArtifactId = Id.Artifact.from(ns1, AllProgramsApp.class.getSimpleName(),
+          "1.0.0-SNAPSHOT");
+
+      HttpResponse response = addAppArtifact(ns1ArtifactId, AllProgramsApp.class);
+      Assert.assertEquals(200, response.getResponseCode());
+      Id.Application appId = Id.Application.from(ns1, ns1AppName);
+      response = deploy(appId,
+          new AppRequest<>(ArtifactSummary.from(ns1ArtifactId.toArtifactId())));
+      Assert.assertEquals(200, response.getResponseCode());
+    }
+
+    long result = getAppCount(TEST_NAMESPACE1);
+    Assert.assertEquals(10, result);
+
+    HttpResponse response = doDelete(getVersionedApiPath("apps/",
+        Constants.Gateway.API_VERSION_3_TOKEN, TEST_NAMESPACE1));
+    Assert.assertEquals(200, response.getResponseCode());
+
+    result = getAppCount(TEST_NAMESPACE1);
+    Assert.assertEquals(0, result);
   }
 
   @After

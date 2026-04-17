@@ -27,10 +27,12 @@ import com.google.inject.assistedinject.FactoryModuleBuilder;
 import com.google.inject.name.Names;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.DFSLocationModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.KafkaClientModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.guice.ZkClientModule;
 import io.cdap.cdap.common.guice.ZkDiscoveryModule;
@@ -44,7 +46,7 @@ import io.cdap.cdap.data.runtime.SystemDatasetRuntimeModule;
 import io.cdap.cdap.data2.audit.AuditModule;
 import io.cdap.cdap.logging.appender.LogAppenderInitializer;
 import io.cdap.cdap.logging.guice.KafkaLogAppenderModule;
-import io.cdap.cdap.messaging.guice.MessagingClientModule;
+import io.cdap.cdap.messaging.guice.client.DefaultMessagingClientModule;
 import io.cdap.cdap.metrics.guice.MetricsClientRuntimeModule;
 import io.cdap.cdap.metrics.guice.MetricsProcessorStatusServiceModule;
 import io.cdap.cdap.metrics.guice.MetricsStoreModule;
@@ -95,7 +97,7 @@ public final class MetricsProcessorTwillRunnable extends AbstractMasterTwillRunn
     LoggingContextAccessor.setLoggingContext(
         new ServiceLoggingContext(NamespaceId.SYSTEM.getNamespace(),
             Constants.Logging.COMPONENT_NAME,
-            Constants.Service.METRICS_PROCESSOR));
+            Constants.Service.METRICS));
     return injector;
   }
 
@@ -120,7 +122,7 @@ public final class MetricsProcessorTwillRunnable extends AbstractMasterTwillRunn
         new ZkClientModule(),
         new ZkDiscoveryModule(),
         new KafkaClientModule(),
-        new MessagingClientModule(),
+        new DefaultMessagingClientModule(),
         new MetricsClientRuntimeModule().getDistributedModules(),
         new MetricsStoreModule(),
         new KafkaLogAppenderModule(),
@@ -135,6 +137,8 @@ public final class MetricsProcessorTwillRunnable extends AbstractMasterTwillRunn
         new AuthorizationEnforcementModule().getDistributedModules(),
         new AuthenticationContextModules().getMasterModule(),
         new MetricsWriterModule(),
+        new NoOpAuditLogModule(),
+        new UserCredentialAeadEncryptionModule(),
         new AbstractModule() {
           @Override
           protected void configure() {

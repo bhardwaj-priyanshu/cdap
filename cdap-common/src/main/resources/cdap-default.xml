@@ -214,6 +214,15 @@
   </property>
 
   <property>
+    <name>location.cache.force.cleanup.ms</name>
+    <value>3600000</value>
+    <description>
+      Time duration after which the location cache is forced cleaned up. A
+      non-positive value indicates that the cache is never forced cleaned up.
+    </description>
+  </property>
+
+  <property>
     <name>thrift.max.read.buffer</name>
     <value>16777216</value>
     <description>
@@ -452,6 +461,15 @@
 
 
   <!-- Applications Configuration -->
+
+  <property>
+    <name>app.list.default.page.size</name>
+    <value>0</value>
+    <description>
+      This represents the default value of pageSize during list apps call.
+    </description>
+  </property>
+
   <property>
     <name>app.artifact.compute.hash.time.bucket.days</name>
     <value>15</value>
@@ -505,10 +523,18 @@
   </property>
 
   <property>
-    <name>app.bind.port</name>
+    <name>appfabric.processor.bind.port</name>
     <value>0</value>
     <description>
-      App Fabric service bind port; if 0, binds to a random port
+      App Fabric processor bind port; if 0, binds to a random port
+    </description>
+  </property>
+
+  <property>
+    <name>appfabric.bind.port</name>
+    <value>0</value>
+    <description>
+      App Fabric server bind port; if 0, binds to a random port
     </description>
   </property>
 
@@ -563,31 +589,6 @@
     <value>false</value>
     <description>Allows users to disable program launches on CDAP cluster.
       True means program launch on CDAP cluster is not allowed.
-    </description>
-  </property>
-
-  <property>
-    <name>run.record.monitor.record.age.threshold.seconds</name>
-    <value>3600</value>
-    <description>
-      Maximum amount of time (in seconds) in which a run record is retained in
-      run record monitor.
-      This is to safe guard launch requests flow-control such that if a request
-      is somehow stuck in PENDING/STARTING
-      state, it will be dropped from after the threshold.
-      Note that run.record.monitor.cleanup.interval.seconds might be needed to
-      changed if this config changes.
-    </description>
-  </property>
-
-  <property>
-    <name>run.record.monitor.cleanup.interval.seconds</name>
-    <value>60</value>
-    <description>
-      Cleanup interval (in seconds) in which run record monitor service cleanup
-      logic runs to delete old entries.
-      Note that run.record.monitor.record.age.threshold.seconds might be needed
-      to changed if this config changes.
     </description>
   </property>
 
@@ -1265,6 +1266,33 @@
     <value>2000</value>
     <description>
       The delay between retries due to connection failures in milliseconds.
+    </description>
+  </property>
+
+  <property>
+    <name>data.storage.properties.gcp-spanner.tx.runner.max.retries</name>
+    <value>12</value>
+    <description>
+      The max number of retries for the spanner transaction runner on retryable
+      failures.
+    </description>
+  </property>
+
+  <property>
+    <name>data.storage.properties.gcp-spanner.compression.config</name>
+    <value>application_specs:application_data:SNAPPY,provisioner_data:provisioner_task_info:SNAPPY,destination_fields_table:destination_data:SNAPPY,summary_fields_table:destination_data:SNAPPY,run_records:run_record_data:SNAPPY,workflows:workflow_data:SNAPPY,operations_table:operations:SNAPPY</value>
+    <description>
+      Represents table_name:column_name:compressor_type which possibly can cross spanner cell limit
+      and will need compression to reduce size.
+      WARNING: Removing fields from here is a backward incompatible operation.
+    </description>
+  </property>
+
+  <property>
+    <name>data.storage.properties.gcp-spanner.tx.runner.initial.delay.ms</name>
+    <value>500</value>
+    <description>
+      The initial delay between retries due to spanner transaction failures in milliseconds.
     </description>
   </property>
 
@@ -2236,6 +2264,13 @@
     </description>
   </property>
 
+  <property>
+    <name>log.saver.status.bind.port</name>
+    <value>0</value>
+    <description>
+      Log saver HTTP service bind port
+    </description>
+  </property>
 
   <!-- Market Configuration -->
 
@@ -2395,6 +2430,11 @@
 
 
   <!-- Messaging System Configuration -->
+
+  <property>
+    <name>messaging.service.enabled</name>
+    <value>true</value>
+  </property>
 
   <property>
     <name>messaging.service.extensions.dir</name>
@@ -2612,7 +2652,7 @@
   <property>
     <name>messaging.system.topics</name>
     <value>
-      ${audit.topic},${metadata.messaging.topic},${data.event.topic},${metrics.topic.prefix}:${metrics.messaging.topic.num},${metrics.admin.topic},${time.event.topic},${program.status.event.topic},${program.status.event.topic}:${program.status.event.topic.num.partitions},${operation.status.event.topic}:${operation.status.event.topic.num.partitions},${program.status.record.event.topic},${log.tms.topic.prefix}:${log.publish.num.partitions},${preview.messaging.topic},previewlog0
+      ${audit.topic},${metadata.messaging.topic},${data.event.topic},${metrics.topic.prefix}:${metrics.messaging.topic.num},${metrics.admin.topic},${time.event.topic},${program.status.event.topic},${program.status.event.topic}:${program.status.event.topic.num.partitions},${operation.status.event.topic}:${operation.status.event.topic.num.partitions},${program.status.record.event.topic},${log.tms.topic.prefix}:${log.publish.num.partitions},${preview.messaging.topic},previewlog0,${auditlog.event.topic}:${auditlog.event.topic.num.partitions}
     </value>
     <description>
       A comma-separated list of topics that are always available in the
@@ -2649,6 +2689,30 @@
     <value>604800</value>
     <description>
       The default time-to-live in seconds for messages in a topic
+    </description>
+  </property>
+
+  <property>
+    <name>messaging.spanner.properties.publish.batch.size</name>
+    <value>50</value>
+    <description>
+      The default max number of messages in each publish batch for spanner messaging service.
+    </description>
+  </property>
+
+  <property>
+    <name>messaging.spanner.properties.publish.batch.timeout.millis</name>
+    <value>50</value>
+    <description>
+      The default maximum waiting time before a batch is published by spanner messaging service.
+    </description>
+  </property>
+
+  <property>
+    <name>messaging.spanner.properties.publish.batch.poll.millis</name>
+    <value>5</value>
+    <description>
+      The default polling frequency while either max batch size or batch timeout criterion is met.
     </description>
   </property>
 
@@ -2769,6 +2833,21 @@
       Enable or disable publishing of field level lineage,
       by default set to true.
     </description>
+  </property>
+
+  <property>
+    <name>log.publisher.enabled</name>
+    <value>false</value>
+  </property>
+
+  <property>
+    <name>log.publisher.extensions.dir</name>
+    <value>/opt/cdap/master/ext/log-publisher</value>
+  </property>
+
+  <property>
+    <name>metadata.storage.extensions.dir</name>
+    <value>/opt/cdap/master/ext/metadata-storage</value>
   </property>
 
   <!-- Metrics Configuration -->
@@ -3773,6 +3852,14 @@
   </property>
 
   <property>
+    <name>preview.http.compress.payload</name>
+    <value>true</value>
+    <description>
+      Compress payload for HTTP calls in the preview http handler.
+    </description>
+  </property>
+
+  <property>
     <name>service.retry.policy.base.delay.ms</name>
     <value>100</value>
     <description>
@@ -4442,6 +4529,47 @@
     </description>
   </property>
 
+  <property>
+    <name>system.auditlog.retry.policy.base.delay.ms</name>
+    <value>100</value>
+    <description>
+      The base delay between retries in milliseconds
+    </description>
+  </property>
+
+  <property>
+    <name>system.auditlog.retry.policy.max.delay.ms</name>
+    <value>2000</value>
+    <description>
+      The maximum delay between retries in milliseconds
+    </description>
+  </property>
+
+  <property>
+    <name>system.auditlog.retry.policy.max.retries</name>
+    <value>100</value>
+    <description>
+      The maximum number of retries to attempt before aborting
+    </description>
+  </property>
+
+  <property>
+    <name>system.auditlog.retry.policy.max.time.secs</name>
+    <value>2147483647</value>
+    <description>
+      The maximum elapsed time in seconds before retries are aborted
+    </description>
+  </property>
+
+  <property>
+    <name>system.auditlog.retry.policy.type</name>
+    <value>exponential.backoff</value>
+    <description>
+      The type of retry policy for workers. Allowed options: "none",
+      "fixed.delay", or "exponential.backoff".
+    </description>
+  </property>
+
   <!-- Router Configuration -->
 
   <property>
@@ -4898,6 +5026,26 @@
   </property>
 
   <property>
+    <name>security.store.system.properties.gcp-cloudkms.key.rotation.enabled</name>
+    <value>true</value>
+    <description>
+      Enable key rotation for KMS keys used to encrypt and decrypt secure keys.
+      When true, it will enable rotation for newly created keys as well as
+      existing keys (after upgrade).
+    </description>
+  </property>
+
+  <property>
+    <name>security.store.system.properties.gcp-cloudkms.key.rotation.period.days</name>
+    <value>90</value>
+    <description>
+      Specifies the rotation period applied to KMS keys when
+      security.store.system.properties.gcp-cloudkms.key.rotation.enabled is true.
+      The rotation period must be at least 1 day.
+    </description>
+  </property>
+
+  <property>
     <name>security.token.digest.algorithm</name>
     <value>HmacSHA256</value>
     <description>
@@ -5334,7 +5482,8 @@
     <value>true</value>
     <description>
       Whether user code isolation is enabled in task worker. When enabled, task workers will ensure
-      only 1 request is accepted at max and later after the task worker is restarted it can take next request.
+      only 1 request is accepted at max and later after the task worker is restarted it can take
+      next request.
     </description>
   </property>
 
@@ -5458,6 +5607,95 @@
     <value>${task.worker.http.client.connection.timeout.ms}</value>
     <description>
       Connection timeout in milliseconds for system app tasks HTTP requests.
+    </description>
+  </property>
+
+  <property>
+    <name>task.worker.probe.enabled</name>
+    <value>false</value>
+    <description>
+      Whether to configure a probe for the task worker.
+    </description>
+  </property>
+
+  <property>
+    <name>task.worker.probe.k8s.names</name>
+    <value>liveness</value>
+    <description>
+      A Comma separated value of kubernetes probe names. Ex : "liveness","readiness"
+    </description>
+  </property>
+
+  <property>
+    <name>task.worker.probe.k8s.liveness.type</name>
+    <value>httpget</value>
+    <description>
+      Which type of liveness probe to be used.
+    </description>
+  </property>
+
+  <property>
+    <name>task.worker.probe.k8s.liveness.http.port</name>
+    <value>${task.worker.bind.port}</value>
+    <description>
+      The port number on the container where the API server is listening.
+    </description>
+  </property>
+
+  <property>
+    <name>task.worker.probe.k8s.liveness.http.path</name>
+    <value>/ping</value>
+    <description>
+      The specific URL path to access on the container.
+    </description>
+  </property>
+
+  <property>
+    <name>task.worker.probe.k8s.liveness.init.delay.seconds</name>
+    <value>20</value>
+    <description>
+      Seconds to wait after container start before the first probe for a task worker.
+    </description>
+  </property>
+
+  <property>
+    <name>task.worker.probe.k8s.liveness.timeout.seconds</name>
+    <value>5</value>
+    <description>
+      Seconds after which the probe is considered failed due to no response.
+    </description>
+  </property>
+
+  <property>
+    <name>task.worker.probe.k8s.liveness.failure.threshold</name>
+    <value>12</value>
+    <description>
+      Number of consecutive failures before k8s restarts the task worker container.
+    </description>
+  </property>
+
+  <property>
+    <name>task.worker.probe.k8s.liveness.period.seconds</name>
+    <value>10</value>
+    <description>
+      The time interval (in seconds) between consecutive probe executions.
+    </description>
+  </property>
+
+  <property>
+    <name>task.worker.probe.k8s.liveness.success.threshold</name>
+    <value>1</value>
+    <description>
+      Minimum consecutive successes for the probe to be considered successful after having failed.
+      Keeping same as K8s default.
+    </description>
+  </property>
+
+  <property>
+    <name>task.worker.probe.k8s.liveness.http.scheme</name>
+    <value>HTTPS</value>
+    <description>
+      The protocol used to connect to the host.
     </description>
   </property>
 
@@ -6006,6 +6244,14 @@
   </property>
 
   <property>
+    <name>feature.wrangler.workspace.auth.check.enabled</name>
+    <value>false</value>
+    <description>
+      Enables authorization enforcement on workspace actions in Wrangler. If disabled, no checks will be performed.
+    </description>
+  </property>
+
+  <property>
     <name>feature.namespaced.service.accounts.enabled</name>
     <value>false</value>
     <description>
@@ -6018,6 +6264,14 @@
     <value>true</value>
     <description>
       If true, wrangler will serialize rows using kryo.
+    </description>
+  </property>
+
+  <property>
+    <name>feature.dataplane.audit.logging.enabled</name>
+    <value>true</value>
+    <description>
+      Enables dataplane audit logging for RBAC instances.
     </description>
   </property>
 
@@ -6425,6 +6679,56 @@
     <description>
       The delay in milliseconds to check again for new operation status events
       after it detects there was no event
+    </description>
+  </property>
+
+  <property>
+    <name>auditlog.publish.interval.seconds</name>
+    <value>20</value>
+    <description>
+      The interval between Audit log publish calls to external auth in seconds.
+    </description>
+  </property>
+
+  <property>
+    <name>auditlog.event.topic</name>
+    <value>auditlogevent</value>
+    <description>
+      Topic prefix for publishing audit log events.
+    </description>
+  </property>
+
+  <property>
+    <name>auditlog.event.topic.num.partitions</name>
+    <value>3</value>
+    <description>
+      Number of topics to use for writing and reading audit log events.
+      All events related to same call should always go to same topic.
+    </description>
+  </property>
+
+  <property>
+    <name>auditlog.messaging.fetch.size</name>
+    <value>20</value>
+    <description>
+      Number of messages to fetch from messaging system for each batch to consume by Audit log
+      consumer.
+    </description>
+  </property>
+
+  <property>
+    <name>auditlog.messaging.poll.delay.millis</name>
+    <value>4000</value>
+    <description>
+      The delay in milliseconds to check again for new audit log events from messaging system.
+    </description>
+  </property>
+
+  <property>
+    <name>ui.default.poll.interval.millis</name>
+    <value>10000</value>
+    <description>
+      The default polling interval in milliseconds for poll calls from cdap-ui.
     </description>
   </property>
 

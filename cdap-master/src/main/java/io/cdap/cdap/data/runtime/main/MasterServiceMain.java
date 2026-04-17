@@ -30,6 +30,7 @@ import com.google.inject.Injector;
 import com.google.inject.Key;
 import io.cdap.cdap.api.metrics.MetricsCollectionService;
 import io.cdap.cdap.app.guice.AppFabricServiceRuntimeModule;
+import io.cdap.cdap.app.guice.AuditLogWriterModule;
 import io.cdap.cdap.app.guice.AuthorizationModule;
 import io.cdap.cdap.app.guice.MonitorHandlerModule;
 import io.cdap.cdap.app.guice.ProgramRunnerRuntimeModule;
@@ -40,6 +41,7 @@ import io.cdap.cdap.common.MasterUtils;
 import io.cdap.cdap.common.app.MainClassLoader;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.DFSLocationModule;
 import io.cdap.cdap.common.guice.FileContextProvider;
@@ -67,16 +69,16 @@ import io.cdap.cdap.data2.metadata.writer.MessagingMetadataPublisher;
 import io.cdap.cdap.data2.metadata.writer.MetadataPublisher;
 import io.cdap.cdap.data2.metadata.writer.MetadataServiceClient;
 import io.cdap.cdap.internal.app.runtime.monitor.RuntimeServer;
+import io.cdap.cdap.internal.app.services.AppFabricProcessorService;
 import io.cdap.cdap.internal.app.services.AppFabricServer;
 import io.cdap.cdap.logging.appender.LogAppenderInitializer;
 import io.cdap.cdap.logging.guice.KafkaLogAppenderModule;
 import io.cdap.cdap.master.startup.ServiceResourceKeys;
-import io.cdap.cdap.messaging.guice.MessagingClientModule;
+import io.cdap.cdap.messaging.guice.client.DefaultMessagingClientModule;
 import io.cdap.cdap.metrics.guice.MetricsClientRuntimeModule;
 import io.cdap.cdap.metrics.guice.MetricsStoreModule;
 import io.cdap.cdap.operations.OperationalStatsService;
 import io.cdap.cdap.operations.guice.OperationalStatsModule;
-import io.cdap.cdap.proto.id.NamespaceId;
 import io.cdap.cdap.security.TokenSecureStoreRenewer;
 import io.cdap.cdap.security.auth.context.AuthenticationContextModules;
 import io.cdap.cdap.security.authorization.AccessControllerInstantiator;
@@ -537,15 +539,18 @@ public class MasterServiceMain extends DaemonMain {
         new DataSetsModules().getDistributedModules(),
         new MetricsClientRuntimeModule().getDistributedModules(),
         new MetricsStoreModule(),
-        new MessagingClientModule(),
+        new DefaultMessagingClientModule(),
         new AuditModule(),
+        new AuditLogWriterModule(cConf).getDistributedModules(),
+        new UserCredentialAeadEncryptionModule(),
         CoreSecurityRuntimeModule.getDistributedModule(cConf),
         new AuthenticationContextModules().getMasterModule(),
         new AuthorizationModule(),
         new AuthorizationEnforcementModule().getMasterModule(),
         new TwillModule(),
-        new AppFabricServiceRuntimeModule(cConf).getDistributedModules(),
-        new MonitorHandlerModule(true),
+        new AppFabricServiceRuntimeModule(cConf, AppFabricServiceRuntimeModule.ALL_SERVICE_TYPES)
+            .getDistributedModules(),
+        new MonitorHandlerModule(true, cConf),
         new ProgramRunnerRuntimeModule().getDistributedModules(),
         new SecureStoreServerModule(),
         new SupportBundleServiceModule(),
@@ -651,6 +656,7 @@ public class MasterServiceMain extends DaemonMain {
       services.add(new RetryOnStartFailureService(() -> injector.getInstance(DatasetService.class),
           RetryStrategies.exponentialDelay(200, 5000, TimeUnit.MILLISECONDS)));
       services.add(injector.getInstance(AppFabricServer.class));
+      services.add(injector.getInstance(AppFabricProcessorService.class));
       executor = Executors.newSingleThreadScheduledExecutor(
           Threads.createDaemonThreadFactory("master-runner"));
 

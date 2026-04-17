@@ -34,6 +34,7 @@ import io.cdap.cdap.runtime.spi.provisioner.ProvisionerSystemContext;
 import io.cdap.cdap.runtime.spi.runtimejob.DataprocClusterInfo;
 import io.cdap.cdap.runtime.spi.runtimejob.DataprocRuntimeJobDetail;
 import io.cdap.cdap.runtime.spi.runtimejob.DataprocRuntimeJobManager;
+import io.cdap.cdap.runtime.spi.runtimejob.ProgramRunFailureException;
 import io.cdap.cdap.runtime.spi.runtimejob.RuntimeJobDetail;
 import io.cdap.cdap.runtime.spi.runtimejob.RuntimeJobManager;
 import io.cdap.cdap.runtime.spi.runtimejob.RuntimeJobStatus;
@@ -71,7 +72,7 @@ public abstract class AbstractDataprocProvisioner implements Provisioner {
   /**
    * In reuse scenario we can't find "our" cluster by cluster name, so let's put it into the label
    *
-   * @see {@link DataprocProvisioner#getAllocatedClusterName(ProvisionerContext)}
+   * @see DataprocProvisioner#findCluster(String, DataprocClient)
    */
   public static final String LABEL_RUN_KEY = "cdap-run-key";
 
@@ -126,8 +127,10 @@ public abstract class AbstractDataprocProvisioner implements Provisioner {
           // Status details is specific to dataproc jobs, so it was not added to RuntimeJobDetail spi.
           String statusDetails = ((DataprocRuntimeJobDetail) jobDetail).getJobStatusDetails();
           if (statusDetails != null) {
-            LOG.error("Dataproc job '{}' with the status details: {}",
-                jobDetail.getStatus().name(), statusDetails);
+            ProgramRunFailureException e = new ProgramRunFailureException(
+                String.format("Dataproc job '%s' status details: %s",
+                    ((DataprocRuntimeJobDetail) jobDetail).getJobId(), statusDetails));
+            LOG.error("Dataproc Job {}", jobDetail.getStatus(), e);
           }
         }
       } finally {
@@ -237,7 +240,6 @@ public abstract class AbstractDataprocProvisioner implements Provisioner {
     }
     return ImmutableSet.of(DataprocConf.RUNTIME_JOB_MANAGER, DataprocUtils.BUCKET,
         DataprocConf.TOKEN_ENDPOINT_KEY,
-        DataprocUtils.TROUBLESHOOTING_DOCS_URL_KEY,
         DataprocConf.ENCRYPTION_KEY_NAME, DataprocConf.ROOT_URL,
         DataprocConf.COMPUTE_HTTP_REQUEST_CONNECTION_TIMEOUT,
         DataprocConf.COMPUTE_HTTP_REQUEST_READ_TIMEOUT).contains(property);

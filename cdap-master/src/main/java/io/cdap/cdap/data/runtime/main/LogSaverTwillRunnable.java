@@ -24,10 +24,12 @@ import com.google.inject.Injector;
 import com.google.inject.Scopes;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.DFSLocationModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.KafkaClientModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.guice.ZkClientModule;
 import io.cdap.cdap.common.guice.ZkDiscoveryModule;
@@ -41,7 +43,7 @@ import io.cdap.cdap.logging.framework.distributed.DistributedLogFramework;
 import io.cdap.cdap.logging.guice.DistributedLogFrameworkModule;
 import io.cdap.cdap.logging.guice.KafkaLogAppenderModule;
 import io.cdap.cdap.logging.service.LogSaverStatusService;
-import io.cdap.cdap.messaging.guice.MessagingClientModule;
+import io.cdap.cdap.messaging.guice.client.DefaultMessagingClientModule;
 import io.cdap.cdap.metrics.guice.MetricsClientRuntimeModule;
 import io.cdap.cdap.security.auth.context.AuthenticationContextModules;
 import io.cdap.cdap.security.authorization.AuthorizationEnforcementModule;
@@ -117,7 +119,9 @@ public final class LogSaverTwillRunnable extends AbstractMasterTwillRunnable {
         new AuditModule(),
         new AuthorizationEnforcementModule().getDistributedModules(),
         new AuthenticationContextModules().getMasterModule(),
-        new MessagingClientModule(),
+        new DefaultMessagingClientModule(),
+        new NoOpAuditLogModule(),
+        new UserCredentialAeadEncryptionModule(),
         new AbstractModule() {
           @Override
           protected void configure() {

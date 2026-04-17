@@ -35,6 +35,9 @@ import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import javax.annotation.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +47,7 @@ import org.slf4j.LoggerFactory;
 public class MetricsReporterHook extends AbstractHandlerHook {
 
   private static final Logger LOG = LoggerFactory.getLogger(MetricsReporterHook.class);
+  private static final Pattern NAMESPACE_PATTERN = Pattern.compile("/namespaces/([^/]+)");
   private static final String LATENCY_METRIC_NAME = "response.latency";
 
   private final String serviceName;
@@ -71,11 +75,12 @@ public class MetricsReporterHook extends AbstractHandlerHook {
 
   @Override
   public boolean preCall(HttpRequest request, HttpResponder responder, HandlerInfo handlerInfo) {
+
     if (collectorCache == null) {
       return true;
     }
     try {
-      MetricsContext collector = collectorCache.get(createContext(handlerInfo));
+      MetricsContext collector = collectorCache.get(createContext(request, handlerInfo));
       collector.increment("request.received", 1);
       request.headers().add(HttpHeaderNames.CDAP_REQ_TIMESTAMP_HDR, System.nanoTime());
     } catch (Throwable e) {
@@ -90,7 +95,7 @@ public class MetricsReporterHook extends AbstractHandlerHook {
       return;
     }
     try {
-      MetricsContext collector = collectorCache.get(createContext(handlerInfo));
+      MetricsContext collector = collectorCache.get(createContext(request, handlerInfo));
       String name;
       int code = status.code();
       if (code < 100) {
@@ -125,10 +130,10 @@ public class MetricsReporterHook extends AbstractHandlerHook {
     }
   }
 
-  private Map<String, String> createContext(HandlerInfo handlerInfo) {
+  private Map<String, String> createContext(HttpRequest request, HandlerInfo handlerInfo) {
     // todo: really inefficient to call this on the intense data flow path
     return ImmutableMap.of(
-        Constants.Metrics.Tag.NAMESPACE, NamespaceId.SYSTEM.getEntityName(),
+        Constants.Metrics.Tag.NAMESPACE, getNamespaceFromUriIfPresent(request.uri()),
         Constants.Metrics.Tag.COMPONENT, serviceName,
         Constants.Metrics.Tag.HANDLER, getSimpleName(handlerInfo.getHandlerName()),
         Constants.Metrics.Tag.METHOD, handlerInfo.getMethodName());
@@ -137,5 +142,18 @@ public class MetricsReporterHook extends AbstractHandlerHook {
   private String getSimpleName(String className) {
     int ind = className.lastIndexOf('.');
     return className.substring(ind + 1);
+  }
+
+  private static String getNamespaceFromUriIfPresent(@Nullable final String uri) {
+    if (uri == null || uri.isEmpty()) {
+      return NamespaceId.SYSTEM.getEntityName();
+    }
+
+    Matcher matcher = NAMESPACE_PATTERN.matcher(uri);
+    if (matcher.find()) {
+      return matcher.group(1);
+    }
+
+    return NamespaceId.SYSTEM.getEntityName();
   }
 }

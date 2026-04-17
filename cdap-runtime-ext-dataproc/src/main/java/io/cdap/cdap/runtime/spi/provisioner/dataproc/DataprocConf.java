@@ -108,6 +108,8 @@ final class DataprocConf {
   private static final int COMPUTE_HTTP_REQUEST_CONNECTION_TIMEOUT_DEFAULT = 20000;
   public static final String COMPUTE_HTTP_REQUEST_READ_TIMEOUT = "compute.request.read.timeout.millis";
   private static final int COMPUTE_HTTP_REQUEST_READ_TIMEOUT_DEFAULT = 20000;
+  private static final String COMPUTE_CREDENTIALS_MAX_RETRIES_KEY = "compute.credentials.max.retries";
+  private static final int COMPUTE_CREDENTIALS_MAX_RETRIES_DEFAULT = 50;
 
   private final String accountKey;
   private final String region;
@@ -167,6 +169,7 @@ final class DataprocConf {
   private final boolean runtimeJobManagerEnabled;
 
   private final String tokenEndpoint;
+  private final int computeCredentialsMaxRetries;
 
   private final boolean clusterReuseEnabled;
   private final long clusterReuseThresholdMinutes;
@@ -175,17 +178,12 @@ final class DataprocConf {
   private final long clusterReuseUpdateMaxMs;
   private final String clusterReuseKey;
   private final boolean enablePredefinedAutoScaling;
+
   private final boolean disableLocalCaching;
+  private final boolean gcsCacheEnabled;
 
   private final int computeReadTimeout;
   private final int computeConnectionTimeout;
-
-  private final boolean gcsCacheEnabled;
-  private final String troubleshootingDocsUrl;
-
-  public String getTroubleshootingDocsUrl() {
-    return troubleshootingDocsUrl;
-  }
 
   private DataprocConf(@Nullable String accountKey, String region, String zone, String projectId,
       @Nullable String networkHostProjectId, @Nullable String network, @Nullable String subnet,
@@ -204,13 +202,12 @@ final class DataprocConf {
       @Nullable Map<String, String> clusterLabels, List<String> networkTags,
       List<String> scopes, @Nullable String initActions, boolean runtimeJobManagerEnabled,
       Map<String, String> clusterProperties, @Nullable String autoScalingPolicy, int idleTtlMinutes,
-      @Nullable String tokenEndpoint, boolean secureBootEnabled, boolean vTpmEnabled,
-      boolean integrityMonitoringEnabled, boolean clusterReuseEnabled,
+      @Nullable String tokenEndpoint, int computeCredentialsMaxRetries, boolean secureBootEnabled,
+      boolean vTpmEnabled, boolean integrityMonitoringEnabled, boolean clusterReuseEnabled,
       long clusterReuseThresholdMinutes, long clusterReuseRetryDelayMs, long clusterReuseRetryMaxMs,
       long clusterReuseUpdateMaxMs, @Nullable String clusterReuseKey,
       boolean enablePredefinedAutoScaling, int computeReadTimeout, int computeConnectionTimeout,
-      @Nullable String rootUrl, boolean gcsCacheEnabled, boolean disableLocalCaching,
-      String troubleshootingDocsUrl) {
+      @Nullable String rootUrl, boolean gcsCacheEnabled, boolean disableLocalCaching) {
     this.accountKey = accountKey;
     this.region = region;
     this.zone = zone;
@@ -263,6 +260,7 @@ final class DataprocConf {
     this.autoScalingPolicy = autoScalingPolicy;
     this.idleTtlMinutes = idleTtlMinutes;
     this.tokenEndpoint = tokenEndpoint;
+    this.computeCredentialsMaxRetries = computeCredentialsMaxRetries;
     this.secureBootEnabled = secureBootEnabled;
     this.vTpmEnabled = vTpmEnabled;
     this.integrityMonitoringEnabled = integrityMonitoringEnabled;
@@ -272,7 +270,6 @@ final class DataprocConf {
     this.rootUrl = rootUrl;
     this.gcsCacheEnabled = gcsCacheEnabled;
     this.disableLocalCaching = disableLocalCaching;
-    this.troubleshootingDocsUrl = troubleshootingDocsUrl;
   }
 
   String getRegion() {
@@ -535,7 +532,7 @@ final class DataprocConf {
    */
   GoogleCredentials getComputeCredential() throws IOException {
     if (accountKey == null) {
-      return ComputeEngineCredentials.getOrCreate(tokenEndpoint);
+      return ComputeEngineCredentials.getOrCreate(tokenEndpoint, computeCredentialsMaxRetries);
     }
 
     try (InputStream is = new ByteArrayInputStream(accountKey.getBytes(StandardCharsets.UTF_8))) {
@@ -552,7 +549,7 @@ final class DataprocConf {
    */
   GoogleCredentials getDataprocCredentials() throws IOException {
     if (accountKey == null) {
-      return ComputeEngineCredentials.getOrCreate(tokenEndpoint);
+      return ComputeEngineCredentials.getOrCreate(tokenEndpoint, computeCredentialsMaxRetries);
     }
 
     try (InputStream is = new ByteArrayInputStream(accountKey.getBytes(StandardCharsets.UTF_8))) {
@@ -577,8 +574,10 @@ final class DataprocConf {
     String accountKey = getString(properties, "accountKey");
     if (accountKey == null || AUTO_DETECT.equals(accountKey)) {
       String endPoint = getString(properties, TOKEN_ENDPOINT_KEY);
+      int maxRetries = getInt(properties, COMPUTE_CREDENTIALS_MAX_RETRIES_KEY,
+          COMPUTE_CREDENTIALS_MAX_RETRIES_DEFAULT);
       try {
-        ComputeEngineCredentials.getOrCreate(endPoint);
+        ComputeEngineCredentials.getOrCreate(endPoint, maxRetries);
       } catch (IOException e) {
         throw new IllegalArgumentException("Unable to get credentials from the environment. "
             + "Please explicitly set the account key.", e);
@@ -587,7 +586,8 @@ final class DataprocConf {
     String projectId = getString(properties, PROJECT_ID_KEY);
     if (projectId == null || AUTO_DETECT.equals(projectId)) {
       projectId = DataprocUtils.getSystemProjectId(
-          (url -> (HttpURLConnection) url.openConnection()));
+          (url -> (HttpURLConnection) url.openConnection()),
+          DataprocRuntimeException.ERROR_CATEGORY_PROVISIONING_CONFIGURATION);
     }
 
     String zone = getString(properties, "zone");
@@ -732,6 +732,8 @@ final class DataprocConf {
         CLUSTER_IDLE_TTL_MINUTES, CLUSTER_IDLE_TTL_MINUTES_DEFAULT);
 
     final String tokenEndpoint = getString(properties, TOKEN_ENDPOINT_KEY);
+    final int computeCredentialsMaxRetries = getInt(properties, COMPUTE_CREDENTIALS_MAX_RETRIES_KEY,
+        COMPUTE_CREDENTIALS_MAX_RETRIES_DEFAULT);
     final boolean secureBootEnabled = Boolean.parseBoolean(
         properties.getOrDefault(SECURE_BOOT_ENABLED, "false"));
     final boolean vTpmEnabled = Boolean.parseBoolean(
@@ -776,10 +778,8 @@ final class DataprocConf {
         properties.getOrDefault(DataprocUtils.GCS_CACHE_ENABLED, "true"));
     // If true, artifacts will not be cached locally.
     final boolean disableLocalCaching =
-        Boolean.parseBoolean(properties.getOrDefault(DataprocUtils.LOCAL_CACHE_DISABLED, "false"));
-    final String troubleshootingDocsUrl =
-        properties.getOrDefault(DataprocUtils.TROUBLESHOOTING_DOCS_URL_KEY,
-            DataprocUtils.TROUBLESHOOTING_DOCS_URL_DEFAULT);
+        Boolean.parseBoolean(properties.getOrDefault(DataprocUtils.LOCAL_CACHE_DISABLED,
+            "false"));
 
     final String scopesProperty = String.format("%s,%s",
         Optional.ofNullable(getString(properties, SCOPES)).orElse(""), CLOUD_PLATFORM_SCOPE);
@@ -802,11 +802,11 @@ final class DataprocConf {
         componentGatewayEnabled, skipDelete,
         imageVersion, customImageUri, clusterMetaData, clusterLabels, networkTags,
         scopes, initActions, runtimeJobManagerEnabled, clusterProps, autoScalingPolicy, idleTtl,
-        tokenEndpoint, secureBootEnabled, vTpmEnabled, integrityMonitoringEnabled,
+        tokenEndpoint, computeCredentialsMaxRetries, secureBootEnabled, vTpmEnabled, integrityMonitoringEnabled,
         clusterReuseEnabled, clusterReuseThresholdMinutes, clusterReuseRetryDelayMs,
         clusterReuseRetryMaxMs, clusterReuseUpdateMaxMs, clusterReuseKey,
         enablePredefinedAutoScaling, computeReadTimeout, computeConnectionTimeout, rootUrl,
-        gcsCacheEnabled, disableLocalCaching, troubleshootingDocsUrl);
+        gcsCacheEnabled, disableLocalCaching);
   }
 
   // the UI never sends nulls, it only sends empty strings.

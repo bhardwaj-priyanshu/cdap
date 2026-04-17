@@ -17,6 +17,7 @@
 package io.cdap.cdap.internal.guice;
 
 import com.google.inject.AbstractModule;
+import com.google.inject.name.Names;
 import io.cdap.cdap.app.guice.AppFabricServiceRuntimeModule;
 import io.cdap.cdap.app.guice.AuthorizationModule;
 import io.cdap.cdap.app.guice.MonitorHandlerModule;
@@ -24,9 +25,12 @@ import io.cdap.cdap.app.guice.ProgramRunnerRuntimeModule;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.conf.SConfiguration;
+import io.cdap.cdap.common.encryption.AeadCipher;
+import io.cdap.cdap.common.encryption.NoOpAeadCipher;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.InMemoryDiscoveryModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.NonCustomLocationUnitTestModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.twill.NoopTwillRunnerService;
@@ -82,6 +86,8 @@ public final class AppFabricTestModule extends AbstractModule {
 
   @Override
   protected void configure() {
+    bind(AeadCipher.class).annotatedWith(Names.named("UserCredentialEncryption")).to(
+        NoOpAeadCipher.class);
     install(new DataFabricModules().getInMemoryModules());
     install(new DataSetsModules().getStandaloneModules());
     install(new TransactionExecutorModule());
@@ -90,8 +96,9 @@ public final class AppFabricTestModule extends AbstractModule {
     install(RemoteAuthenticatorModules.getNoOpModule());
     install(new IOModule());
     install(new InMemoryDiscoveryModule());
-    install(new AppFabricServiceRuntimeModule(cConf).getInMemoryModules());
-    install(new MonitorHandlerModule(false));
+    install(new AppFabricServiceRuntimeModule(cConf, AppFabricServiceRuntimeModule.ALL_SERVICE_TYPES)
+        .getInMemoryModules());
+    install(new MonitorHandlerModule(false, cConf));
     install(new ProgramRunnerRuntimeModule().getInMemoryModules());
     install(new NonCustomLocationUnitTestModule());
     install(new LocalLogAppenderModule());
@@ -108,6 +115,7 @@ public final class AppFabricTestModule extends AbstractModule {
     install(new MetadataReaderWriterModules().getInMemoryModules());
     install(new MessagingServerRuntimeModule().getInMemoryModules());
     install(new MockProvisionerModule());
+    install(new NoOpAuditLogModule());
     // Needed by MonitorHandlerModuler
     bind(TwillRunner.class).to(NoopTwillRunnerService.class);
   }

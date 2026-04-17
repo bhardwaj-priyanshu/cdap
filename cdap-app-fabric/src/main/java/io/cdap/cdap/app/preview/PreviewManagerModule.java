@@ -21,12 +21,15 @@ import com.google.inject.Scopes;
 import com.google.inject.multibindings.Multibinder;
 import com.google.inject.name.Names;
 import io.cdap.cdap.app.store.preview.PreviewStore;
+import io.cdap.cdap.common.conf.CConfiguration;
+import io.cdap.cdap.common.conf.Constants.MessagingSystem;
 import io.cdap.cdap.data.runtime.DataSetsModules;
 import io.cdap.cdap.data2.datafabric.dataset.RemoteDatasetFramework;
 import io.cdap.cdap.data2.dataset2.DatasetDefinitionRegistryFactory;
 import io.cdap.cdap.data2.dataset2.DatasetFramework;
 import io.cdap.cdap.data2.dataset2.DefaultDatasetDefinitionRegistryFactory;
 import io.cdap.cdap.gateway.handlers.CommonHandlers;
+import io.cdap.cdap.gateway.handlers.preview.PreviewErrorClassificationHttpHandler;
 import io.cdap.cdap.gateway.handlers.preview.PreviewHttpHandler;
 import io.cdap.cdap.gateway.handlers.preview.PreviewHttpHandlerInternal;
 import io.cdap.cdap.internal.app.preview.DefaultPreviewManager;
@@ -36,6 +39,9 @@ import io.cdap.cdap.internal.app.preview.DistributedPreviewRunStopper;
 import io.cdap.cdap.internal.app.preview.PreviewDataCleanupService;
 import io.cdap.cdap.internal.app.preview.PreviewRunStopper;
 import io.cdap.cdap.internal.app.store.preview.DefaultPreviewStore;
+import io.cdap.cdap.messaging.server.FetchHandler;
+import io.cdap.cdap.messaging.server.MetadataHandler;
+import io.cdap.cdap.messaging.server.StoreHandler;
 import io.cdap.http.HttpHandler;
 
 /**
@@ -45,7 +51,10 @@ public class PreviewManagerModule extends PrivateModule {
 
   private final boolean distributedRunner;
 
-  public PreviewManagerModule(boolean distributedRunner) {
+  private final CConfiguration cConf;
+
+  public PreviewManagerModule(CConfiguration cConf, boolean distributedRunner) {
+    this.cConf = cConf;
     this.distributedRunner = distributedRunner;
   }
 
@@ -73,7 +82,17 @@ public class PreviewManagerModule extends PrivateModule {
 
     Multibinder<HttpHandler> handlerBinder = Multibinder.newSetBinder(binder(), HttpHandler.class);
     handlerBinder.addBinding().to(PreviewHttpHandler.class);
+    handlerBinder.addBinding().to(PreviewErrorClassificationHttpHandler.class);
     handlerBinder.addBinding().to(PreviewHttpHandlerInternal.class);
+
+    if (!cConf.getBoolean(MessagingSystem.MESSAGING_SERVICE_ENABLED)) {
+      // Add these handlers only if messaging service endpoint doesn't exist and preview runners need to
+      // communicate with messaging service via preview manager.
+      handlerBinder.addBinding().to(MetadataHandler.class);
+      handlerBinder.addBinding().to(StoreHandler.class);
+      handlerBinder.addBinding().to(FetchHandler.class);
+    }
+
     CommonHandlers.add(handlerBinder);
 
     bind(PreviewHttpServer.class);

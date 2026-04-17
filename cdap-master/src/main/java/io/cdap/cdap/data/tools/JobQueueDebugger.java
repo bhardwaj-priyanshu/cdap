@@ -62,7 +62,7 @@ import io.cdap.cdap.internal.app.store.DefaultStore;
 import io.cdap.cdap.internal.schedule.constraint.Constraint;
 import io.cdap.cdap.logging.guice.KafkaLogAppenderModule;
 import io.cdap.cdap.messaging.data.MessageId;
-import io.cdap.cdap.messaging.guice.MessagingClientModule;
+import io.cdap.cdap.messaging.guice.client.DefaultMessagingClientModule;
 import io.cdap.cdap.metrics.guice.MetricsClientRuntimeModule;
 import io.cdap.cdap.metrics.guice.MetricsStoreModule;
 import io.cdap.cdap.security.auth.context.AuthenticationContextModules;
@@ -346,7 +346,8 @@ public class JobQueueDebugger extends AbstractIdleService {
         new TwillModule(),
         new DataFabricModules().getDistributedModules(),
         new DataSetsModules().getDistributedModules(),
-        new AppFabricServiceRuntimeModule(cConf).getDistributedModules(),
+        new AppFabricServiceRuntimeModule(cConf, AppFabricServiceRuntimeModule.ALL_SERVICE_TYPES)
+            .getDistributedModules(),
         new ProgramRunnerRuntimeModule().getDistributedModules(),
         new SystemDatasetRuntimeModule().getDistributedModules(),
         new KafkaLogAppenderModule(),
@@ -358,7 +359,7 @@ public class JobQueueDebugger extends AbstractIdleService {
         new AuthorizationModule(),
         new AuthorizationEnforcementModule().getMasterModule(),
         new SecureStoreServerModule(),
-        new MessagingClientModule(),
+        new DefaultMessagingClientModule(),
         new AbstractModule() {
           @Override
           protected void configure() {

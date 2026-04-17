@@ -25,13 +25,13 @@ import com.google.inject.Module;
 import com.google.inject.Scopes;
 import com.google.inject.util.Modules;
 import io.cdap.cdap.app.guice.AppFabricServiceRuntimeModule;
+import io.cdap.cdap.app.guice.AppFabricServiceRuntimeModule.ServiceType;
 import io.cdap.cdap.app.guice.AuthorizationModule;
 import io.cdap.cdap.app.guice.MonitorHandlerModule;
 import io.cdap.cdap.app.guice.ProgramRunnerRuntimeModule;
 import io.cdap.cdap.app.store.ServiceStore;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
-import io.cdap.cdap.common.conf.Constants.SystemWorker;
 import io.cdap.cdap.common.guice.DFSLocationModule;
 import io.cdap.cdap.common.guice.SupplierProviderBridge;
 import io.cdap.cdap.common.logging.LoggingContext;
@@ -41,8 +41,6 @@ import io.cdap.cdap.common.service.RetryStrategies;
 import io.cdap.cdap.data.runtime.DataSetServiceModules;
 import io.cdap.cdap.data.runtime.DataSetsModules;
 import io.cdap.cdap.data2.audit.AuditModule;
-import io.cdap.cdap.data2.datafabric.dataset.service.DatasetService;
-import io.cdap.cdap.data2.datafabric.dataset.service.executor.DatasetOpExecutorService;
 import io.cdap.cdap.data2.metadata.writer.DefaultMetadataServiceClient;
 import io.cdap.cdap.data2.metadata.writer.MessagingMetadataPublisher;
 import io.cdap.cdap.data2.metadata.writer.MetadataPublisher;
@@ -50,8 +48,6 @@ import io.cdap.cdap.data2.metadata.writer.MetadataServiceClient;
 import io.cdap.cdap.internal.app.namespace.LocalStorageProviderNamespaceAdmin;
 import io.cdap.cdap.internal.app.namespace.StorageProviderNamespaceAdmin;
 import io.cdap.cdap.internal.app.services.AppFabricServer;
-import io.cdap.cdap.internal.app.worker.TaskWorkerServiceLauncher;
-import io.cdap.cdap.internal.app.worker.system.SystemWorkerServiceLauncher;
 import io.cdap.cdap.internal.events.EventPublishManager;
 import io.cdap.cdap.master.spi.environment.MasterEnvironment;
 import io.cdap.cdap.master.spi.environment.MasterEnvironmentContext;
@@ -98,7 +94,7 @@ public class AppFabricServiceMain extends AbstractServiceMain<EnvironmentOptions
         new AuditModule(),
         new AuthorizationModule(),
         new AuthorizationEnforcementModule().getMasterModule(),
-        Modules.override(new AppFabricServiceRuntimeModule(cConf).getDistributedModules())
+        Modules.override(new AppFabricServiceRuntimeModule(cConf, ServiceType.SERVER).getDistributedModules())
             .with(new AbstractModule() {
               @Override
               protected void configure() {
@@ -107,7 +103,7 @@ public class AppFabricServiceMain extends AbstractServiceMain<EnvironmentOptions
               }
             }),
         new ProgramRunnerRuntimeModule().getDistributedModules(true),
-        new MonitorHandlerModule(false),
+        new MonitorHandlerModule(false, cConf),
         new SecureStoreServerModule(),
         new OperationalStatsModule(),
         getDataFabricModule(),
@@ -133,11 +129,9 @@ public class AppFabricServiceMain extends AbstractServiceMain<EnvironmentOptions
       List<? super AutoCloseable> closeableResources,
       MasterEnvironment masterEnv, MasterEnvironmentContext masterEnvContext,
       EnvironmentOptions options) {
-    final CConfiguration cConf = injector.getInstance(CConfiguration.class);
     closeableResources.add(injector.getInstance(AccessControllerInstantiator.class));
     services.add(injector.getInstance(OperationalStatsService.class));
     services.add(injector.getInstance(SecureStoreService.class));
-    services.add(injector.getInstance(DatasetOpExecutorService.class));
     services.add(injector.getInstance(ServiceStore.class));
 
     Binding<ZKClientService> zkBinding = injector.getExistingBinding(
@@ -151,20 +145,10 @@ public class AppFabricServiceMain extends AbstractServiceMain<EnvironmentOptions
         Constants.AppFabric.RemoteExecution.class));
     services.add(new TwillRunnerServiceWrapper(remoteTwillRunner));
     services.add(new TwillRunnerServiceWrapper(injector.getInstance(TwillRunnerService.class)));
-    services.add(new RetryOnStartFailureService(() -> injector.getInstance(DatasetService.class),
-        RetryStrategies.exponentialDelay(200, 5000, TimeUnit.MILLISECONDS)));
     services.add(injector.getInstance(AppFabricServer.class));
     services.add(new RetryOnStartFailureService(
         () -> injector.getInstance(NamespaceInitializerService.class),
         RetryStrategies.exponentialDelay(200, 5000, TimeUnit.MILLISECONDS)));
-
-    if (cConf.getBoolean(Constants.TaskWorker.POOL_ENABLE)) {
-      services.add(injector.getInstance(TaskWorkerServiceLauncher.class));
-    }
-
-    if (cConf.getBoolean(SystemWorker.POOL_ENABLE)) {
-      services.add(injector.getInstance(SystemWorkerServiceLauncher.class));
-    }
 
     // Event publisher could rely on task workers for token generated for security enabled deployments
     services.add(injector.getInstance(EventPublishManager.class));

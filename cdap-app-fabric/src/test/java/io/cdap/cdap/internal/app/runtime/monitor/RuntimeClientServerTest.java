@@ -30,15 +30,17 @@ import io.cdap.cdap.app.guice.RuntimeServerModule;
 import io.cdap.cdap.common.app.RunIds;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.InMemoryDiscoveryModule;
 import io.cdap.cdap.common.guice.LocalLocationModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.metrics.NoOpMetricsCollectionService;
 import io.cdap.cdap.messaging.DefaultTopicMetadata;
-import io.cdap.cdap.messaging.spi.MessagingService;
 import io.cdap.cdap.messaging.context.MultiThreadMessagingContext;
 import io.cdap.cdap.messaging.guice.MessagingServerRuntimeModule;
+import io.cdap.cdap.messaging.spi.MessagingService;
 import io.cdap.cdap.proto.id.NamespaceId;
 import io.cdap.cdap.proto.id.ProgramRunId;
 import io.cdap.cdap.proto.id.TopicId;
@@ -112,6 +114,8 @@ public class RuntimeClientServerTest {
     Injector injector = Guice.createInjector(
       new ConfigModule(cConf),
       RemoteAuthenticatorModules.getNoOpModule(),
+      new NoOpAuditLogModule(),
+      new UserCredentialAeadEncryptionModule(),
       new InMemoryDiscoveryModule(),
       new LocalLocationModule(),
       new MessagingServerRuntimeModule().getInMemoryModules(),

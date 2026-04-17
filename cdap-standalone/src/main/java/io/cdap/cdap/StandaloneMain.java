@@ -44,11 +44,13 @@ import io.cdap.cdap.common.app.MainClassLoader;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.conf.SConfiguration;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.InMemoryDiscoveryModule;
 import io.cdap.cdap.common.guice.KafkaClientModule;
 import io.cdap.cdap.common.guice.LocalLocationModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.guice.ZkClientModule;
 import io.cdap.cdap.common.io.URLConnections;
@@ -67,6 +69,7 @@ import io.cdap.cdap.data2.dataset2.lib.table.leveldb.LevelDBTableService;
 import io.cdap.cdap.gateway.router.NettyRouter;
 import io.cdap.cdap.gateway.router.RouterModules;
 import io.cdap.cdap.internal.app.runtime.monitor.RuntimeServer;
+import io.cdap.cdap.internal.app.services.AppFabricProcessorService;
 import io.cdap.cdap.internal.app.services.AppFabricServer;
 import io.cdap.cdap.internal.app.worker.sidecar.ArtifactLocalizerService;
 import io.cdap.cdap.internal.events.EventPublishManager;
@@ -78,9 +81,9 @@ import io.cdap.cdap.logging.guice.LocalLogAppenderModule;
 import io.cdap.cdap.logging.guice.LogQueryRuntimeModule;
 import io.cdap.cdap.logging.guice.LogReaderRuntimeModules;
 import io.cdap.cdap.logging.service.LogQueryService;
-import io.cdap.cdap.messaging.spi.MessagingService;
 import io.cdap.cdap.messaging.guice.MessagingServerRuntimeModule;
 import io.cdap.cdap.messaging.server.MessagingHttpService;
+import io.cdap.cdap.messaging.spi.MessagingService;
 import io.cdap.cdap.metadata.MetadataReaderWriterModules;
 import io.cdap.cdap.metadata.MetadataService;
 import io.cdap.cdap.metadata.MetadataServiceModule;
@@ -133,6 +136,7 @@ public class StandaloneMain {
   private final MetricsQueryService metricsQueryService;
   private final LogQueryService logQueryService;
   private final AppFabricServer appFabricServer;
+  private final AppFabricProcessorService appFabricProcessorService;
   private final ServiceStore serviceStore;
   private final MetricsCollectionService metricsCollectionService;
   private final LogAppenderInitializer logAppenderInitializer;
@@ -173,6 +177,7 @@ public class StandaloneMain {
     metricsQueryService = injector.getInstance(MetricsQueryService.class);
     logQueryService = injector.getInstance(LogQueryService.class);
     appFabricServer = injector.getInstance(AppFabricServer.class);
+    appFabricProcessorService = injector.getInstance(AppFabricProcessorService.class);
     logAppenderInitializer = injector.getInstance(LogAppenderInitializer.class);
     metricsCollectionService = injector.getInstance(MetricsCollectionService.class);
     datasetService = injector.getInstance(DatasetService.class);
@@ -276,6 +281,11 @@ public class StandaloneMain {
       throw new Exception("Failed to start Application Fabric");
     }
 
+    state = appFabricProcessorService.startAndWait();
+    if (state != Service.State.RUNNING) {
+      throw new Exception("Failed to start Application Fabric Processor");
+    }
+
     artifactLocalizerService.startAndWait();
     // NOTE: As the artifact localizer client does not use service discovery for port discovery,
     // We need to set the port after starting the localizer service.
@@ -346,6 +356,7 @@ public class StandaloneMain {
       eventSubscriberManager.stopAndWait();
       // app fabric will also stop all programs
       appFabricServer.stopAndWait();
+      appFabricProcessorService.stopAndWait();
       runtimeServer.stopAndWait();
       // all programs are stopped: dataset service, metrics, transactions can stop now
       datasetService.stopAndWait();
@@ -515,7 +526,6 @@ public class StandaloneMain {
     cConf.set(Constants.Transaction.Container.ADDRESS, localhost);
     cConf.set(Constants.Dataset.Executor.ADDRESS, localhost);
     cConf.set(Constants.Metrics.ADDRESS, localhost);
-    cConf.set(Constants.MetricsProcessor.BIND_ADDRESS, localhost);
     cConf.set(Constants.LogSaver.ADDRESS, localhost);
     cConf.set(Constants.LogQuery.ADDRESS, localhost);
     cConf.set(Constants.Metadata.SERVICE_BIND_ADDRESS, localhost);
@@ -548,13 +558,16 @@ public class StandaloneMain {
         new AuditModule(),
         new AuthenticationContextModules().getMasterModule(),
         new AuthorizationModule(),
+        new NoOpAuditLogModule(),
+        new UserCredentialAeadEncryptionModule(),
         new AuthorizationEnforcementModule().getStandaloneModules(),
         new PreviewConfigModule(cConf, new Configuration(), SConfiguration.create()),
-        new PreviewManagerModule(false),
+        new PreviewManagerModule(cConf, false),
         new PreviewRunnerManagerModule().getStandaloneModules(),
         new MessagingServerRuntimeModule().getStandaloneModules(),
-        new AppFabricServiceRuntimeModule(cConf).getStandaloneModules(),
-        new MonitorHandlerModule(false),
+        new AppFabricServiceRuntimeModule(cConf, AppFabricServiceRuntimeModule.ALL_SERVICE_TYPES)
+            .getStandaloneModules(),
+        new MonitorHandlerModule(false, cConf),
         new RuntimeServerModule(),
         new OperationalStatsModule(),
         new MetricsWriterModule(),

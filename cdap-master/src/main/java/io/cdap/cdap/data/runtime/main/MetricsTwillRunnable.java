@@ -24,10 +24,12 @@ import com.google.inject.Injector;
 import com.google.inject.Scopes;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.DFSLocationModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.KafkaClientModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.guice.ZkClientModule;
 import io.cdap.cdap.common.guice.ZkDiscoveryModule;
@@ -44,7 +46,7 @@ import io.cdap.cdap.logging.guice.KafkaLogAppenderModule;
 import io.cdap.cdap.logging.guice.LogQueryRuntimeModule;
 import io.cdap.cdap.logging.guice.LogReaderRuntimeModules;
 import io.cdap.cdap.logging.service.LogQueryService;
-import io.cdap.cdap.messaging.guice.MessagingClientModule;
+import io.cdap.cdap.messaging.guice.client.DefaultMessagingClientModule;
 import io.cdap.cdap.metrics.guice.MetricsClientRuntimeModule;
 import io.cdap.cdap.metrics.guice.MetricsHandlerModule;
 import io.cdap.cdap.metrics.guice.MetricsStoreModule;
@@ -109,7 +111,7 @@ public class MetricsTwillRunnable extends AbstractMasterTwillRunnable {
         new ZkClientModule(),
         new ZkDiscoveryModule(),
         new KafkaClientModule(),
-        new MessagingClientModule(),
+        new DefaultMessagingClientModule(),
         new DataFabricModules(txClientId).getDistributedModules(),
         new DataSetsModules().getDistributedModules(),
         // For the injection of DatasetDefinition of MetricsTable directly
@@ -126,6 +128,8 @@ public class MetricsTwillRunnable extends AbstractMasterTwillRunnable {
         new AuditModule(),
         new AuthorizationEnforcementModule().getDistributedModules(),
         new AuthenticationContextModules().getMasterModule(),
+        new NoOpAuditLogModule(),
+        new UserCredentialAeadEncryptionModule(),
         new AbstractModule() {
           @Override
           protected void configure() {

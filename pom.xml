@@ -22,7 +22,7 @@
 
   <groupId>io.cdap.cdap</groupId>
   <artifactId>cdap</artifactId>
-  <version>6.11.0-SNAPSHOT</version>
+  <version>6.12.0-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>Cask Data Application Platform (CDAP)</name>
   <description>Data Application Platform for Hadoop</description>
@@ -71,7 +71,7 @@
     </repository>
     <repository>
       <id>sonatype</id>
-      <url>https://oss.sonatype.org/content/repositories/snapshots/</url>
+      <url>https://central.sonatype.com/repository/maven-snapshots</url>
       <releases>
         <enabled>false</enabled>
       </releases>
@@ -95,18 +95,6 @@
     </repository>
   </repositories>
 
-
-  <distributionManagement>
-    <repository>
-      <id>sonatype.release</id>
-      <url>https://oss.sonatype.org/service/local/staging/deploy/maven2</url>
-    </repository>
-    <snapshotRepository>
-      <id>sonatype.snapshots</id>
-      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
-    </snapshotRepository>
-  </distributionManagement>
-
   <properties>
     <jee.version>7</jee.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -124,8 +112,11 @@
     <cdap.client.version>1.4.0</cdap.client.version>
     <commons.cli.version>1.2</commons.cli.version>
     <commons.collections.version>3.2.2</commons.collections.version>
-    <commons.compress.version>1.22</commons.compress.version>
-    <commons.lang3.version>3.5</commons.lang3.version>
+    <commons.io.version>2.15.1</commons.io.version>
+    <commons.compress.version>1.26.1</commons.compress.version>
+    <bitbucket.jose4j.version>0.9.3</bitbucket.jose4j.version>
+    <commons.lang3.version>3.12.0</commons.lang3.version>
+    <commons-configuration2.version>2.10.1</commons-configuration2.version>
     <dropwizard.version>3.1.2</dropwizard.version>
     <fastutil.version>6.5.6</fastutil.version>
     <findbugs.jsr305.version>2.0.1</findbugs.jsr305.version>
@@ -138,7 +129,6 @@
     <hsql.version>2.2.4</hsql.version>
     <jackson.version>2.15.1</jackson.version>
     <jsch.version>0.1.54</jsch.version>
-    <jetty.version>6.1.22</jetty.version>
     <jetty9.version>9.4.51.v20230217</jetty9.version>
     <jline.version>2.12</jline.version>
     <junit.version>4.11</junit.version>
@@ -196,6 +186,11 @@
   <dependencyManagement>
     <dependencies>
       <dependency>
+        <groupId>org.apache.commons</groupId>
+        <artifactId>commons-configuration2</artifactId>
+        <version>${commons-configuration2.version}</version>
+      </dependency>
+      <dependency>
         <groupId>org.slf4j</groupId>
         <artifactId>slf4j-api</artifactId>
         <version>${slf4j.version}</version>
@@ -219,6 +214,16 @@
         <groupId>org.slf4j</groupId>
         <artifactId>jul-to-slf4j</artifactId>
         <version>${slf4j.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>commons-io</groupId>
+        <artifactId>commons-io</artifactId>
+        <version>${commons.io.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.commons</groupId>
+        <artifactId>commons-compress</artifactId>
+        <version>${commons.compress.version}</version>
       </dependency>
       <dependency>
         <groupId>io.cdap.common</groupId>
@@ -1030,16 +1035,6 @@
         <version>${mysql.version}</version>
       </dependency>
       <dependency>
-        <groupId>org.mortbay.jetty</groupId>
-        <artifactId>jetty</artifactId>
-        <version>${jetty.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.mortbay.jetty</groupId>
-        <artifactId>jetty-management</artifactId>
-        <version>${jetty.version}</version>
-      </dependency>
-      <dependency>
         <groupId>org.quartz-scheduler</groupId>
         <artifactId>quartz</artifactId>
         <version>${quartz.version}</version>
@@ -1690,16 +1685,15 @@
             </execution>
           </executions>
         </plugin>
-
-        <!-- Nexus deploy plugin -->
         <plugin>
-          <groupId>org.sonatype.plugins</groupId>
-          <artifactId>nexus-staging-maven-plugin</artifactId>
-          <version>1.6.2</version>
+          <groupId>org.sonatype.central</groupId>
+          <artifactId>central-publishing-maven-plugin</artifactId>
+          <version>0.8.0</version>
           <extensions>true</extensions>
           <configuration>
-            <nexusUrl>https://oss.sonatype.org</nexusUrl>
-            <serverId>sonatype.release</serverId>
+            <publishingServerId>sonatype.release</publishingServerId>
+            <autoPublish>false</autoPublish>
+            <ignorePublishedComponents>true</ignorePublishedComponents>
           </configuration>
         </plugin>
       </plugins>
@@ -1727,13 +1721,14 @@
         <artifactId>maven-surefire-plugin</artifactId>
       </plugin>
       <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-deploy-plugin</artifactId>
-        <version>2.8</version>
-      </plugin>
-      <plugin>
-        <groupId>org.sonatype.plugins</groupId>
-        <artifactId>nexus-staging-maven-plugin</artifactId>
+        <groupId>org.sonatype.central</groupId>
+        <artifactId>central-publishing-maven-plugin</artifactId>
+        <extensions>true</extensions>
+        <configuration>
+          <publishingServerId>sonatype.release</publishingServerId>
+          <autoPublish>false</autoPublish>
+          <ignorePublishedComponents>true</ignorePublishedComponents>
+        </configuration>
       </plugin>
     </plugins>
   </build>
@@ -1938,7 +1933,7 @@
             <plugin>
               <groupId>org.apache.maven.plugins</groupId>
               <artifactId>maven-dependency-plugin</artifactId>
-              <version>2.8</version>
+              <version>3.8.1</version>
               <executions>
                 <!-- Copy runtime dependencies -->
                 <execution>
@@ -2056,7 +2051,7 @@
             <plugin>
               <groupId>org.apache.maven.plugins</groupId>
               <artifactId>maven-antrun-plugin</artifactId>
-              <version>1.7</version>
+              <version>3.1.0</version>
               <executions>
                 <!--This is for workaround a bug in resource-plugin that it doesn't preserve file permission-->
                 <!--http://jira.codehaus.org/browse/MRESOURCES-132-->
@@ -2223,7 +2218,7 @@
             <plugin>
               <groupId>org.apache.maven.plugins</groupId>
               <artifactId>maven-antrun-plugin</artifactId>
-              <version>1.7</version>
+              <version>3.1.0</version>
               <executions>
                 <execution>
                   <id>rename-rpm-service</id>
@@ -2326,7 +2321,7 @@
             <plugin>
               <groupId>org.apache.maven.plugins</groupId>
               <artifactId>maven-antrun-plugin</artifactId>
-              <version>1.7</version>
+              <version>3.1.0</version>
               <executions>
                 <execution>
                   <id>rename-deb-service</id>
@@ -2598,12 +2593,14 @@
         <module>cdap-security-spi</module>
         <module>cdap-security</module>
         <module>cdap-metadata-spi</module>
+        <module>cdap-metadata-ext-spanner</module>
         <module>cdap-storage-ext-spanner</module>
         <module>cdap-storage-spi</module>
         <module>cdap-system-app-api</module>
         <module>cdap-system-app-unit-test</module>
         <module>cdap-tms</module>
         <module>cdap-messaging-spi</module>
+        <module>cdap-messaging-ext-spanner</module>
         <module>cdap-gateway</module>
         <module>cdap-unit-test</module>
         <module>cdap-unit-test-spark3_2.12</module>
@@ -2634,6 +2631,7 @@
         <module>cdap-authenticator-ext-gcp</module>
         <module>cdap-source-control</module>
         <module>cdap-encryption-ext-tink</module>
+        <module>cdap-log-publisher-spi</module>
       </modules>
     </profile>
     <profile>

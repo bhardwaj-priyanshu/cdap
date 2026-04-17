@@ -20,19 +20,19 @@ import com.google.inject.AbstractModule;
 import com.google.inject.Scopes;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants.MessagingSystem;
+import io.cdap.cdap.messaging.client.DefaultClientMessagingService;
 import io.cdap.cdap.messaging.client.DelegatingMessagingService;
 import io.cdap.cdap.messaging.spi.MessagingService;
-import io.cdap.cdap.messaging.client.ClientMessagingService;
 
 /**
- * The Guice module to bind messaging service based on {@link
- * io.cdap.cdap.common.conf.Constants.MessagingSystem#MESSAGING_SERVICE_NAME} if set in cConf.
- * Otherwise, binds to {@link ClientMessagingService}.
+ * The Guice module to bind messaging service based on
+ * {@link MessagingSystem#MESSAGING_SERVICE_NAME} if set in cConf. Otherwise, binds to
+ * {@link DefaultClientMessagingService}.
  */
 public class MessagingServiceModule extends AbstractModule {
 
   private static final String DEFAULT_MESSAGING_SERVICE_NAME =
-      ClientMessagingService.class.getSimpleName();
+      DefaultClientMessagingService.class.getSimpleName();
   private final String messagingService;
 
   public MessagingServiceModule(CConfiguration cConf) {
@@ -44,7 +44,7 @@ public class MessagingServiceModule extends AbstractModule {
   @Override
   protected void configure() {
     if (messagingService.equals(DEFAULT_MESSAGING_SERVICE_NAME)) {
-      bind(MessagingService.class).to(ClientMessagingService.class).in(Scopes.SINGLETON);
+      bind(MessagingService.class).to(DefaultClientMessagingService.class).in(Scopes.SINGLETON);
     } else {
       bind(MessagingService.class).to(DelegatingMessagingService.class).in(Scopes.SINGLETON);
     }

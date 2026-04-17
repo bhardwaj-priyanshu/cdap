@@ -32,6 +32,7 @@ import com.google.inject.Scopes;
 import com.google.inject.assistedinject.FactoryModuleBuilder;
 import io.cdap.cdap.api.common.Bytes;
 import io.cdap.cdap.app.deploy.Configurator;
+import io.cdap.cdap.app.guice.AuditLogWriterModule;
 import io.cdap.cdap.app.preview.PreviewConfigModule;
 import io.cdap.cdap.app.preview.PreviewRunner;
 import io.cdap.cdap.app.preview.PreviewRunnerManager;
@@ -39,6 +40,7 @@ import io.cdap.cdap.app.preview.PreviewRunnerManagerModule;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.conf.SConfiguration;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.DFSLocationModule;
 import io.cdap.cdap.common.guice.IOModule;
@@ -66,7 +68,7 @@ import io.cdap.cdap.logging.guice.RemoteLogAppenderModule;
 import io.cdap.cdap.master.environment.MasterEnvironments;
 import io.cdap.cdap.master.spi.environment.MasterEnvironment;
 import io.cdap.cdap.master.spi.twill.ExtendedTwillContext;
-import io.cdap.cdap.messaging.guice.MessagingServiceModule;
+import io.cdap.cdap.messaging.guice.client.PreviewRunnerMessagingClientModule;
 import io.cdap.cdap.proto.id.NamespaceId;
 import io.cdap.cdap.security.auth.context.AuthenticationContextModules;
 import io.cdap.cdap.security.authorization.AuthorizationEnforcementModule;
@@ -75,6 +77,7 @@ import io.cdap.cdap.security.impersonation.CurrentUGIProvider;
 import io.cdap.cdap.security.impersonation.UGIProvider;
 import io.cdap.cdap.spi.data.StorageProvider;
 import java.io.File;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -167,12 +170,13 @@ public class PreviewRunnerTwillRunnable extends AbstractTwillRunnable {
     hConf.clear();
     hConf.addResource(new File(getArgument("hConf")).toURI().toURL());
 
+    byte[] secureToken = generateSecureToken();
     PreviewRequestPollerInfo pollerInfo;
     if (context instanceof ExtendedTwillContext) {
       pollerInfo = new PreviewRequestPollerInfo(context.getInstanceId(),
-          ((ExtendedTwillContext) context).getUID());
+          ((ExtendedTwillContext) context).getUID(), secureToken);
     } else {
-      pollerInfo = new PreviewRequestPollerInfo(context.getInstanceId(), null);
+      pollerInfo = new PreviewRequestPollerInfo(context.getInstanceId(), null, secureToken);
     }
 
     CConfiguration cConf = CConfiguration.create(new File(getArgument("cConf")).toURI().toURL());
@@ -236,7 +240,7 @@ public class PreviewRunnerTwillRunnable extends AbstractTwillRunnable {
     }
 
     modules.add(new PreviewRunnerManagerModule().getDistributedModules());
-    modules.add(new MessagingServiceModule(cConf));
+    modules.add(new PreviewRunnerMessagingClientModule(cConf));
     modules.add(new SecureStoreClientModule());
     // Needed for InMemoryProgramRunnerModule. We use local metadata reader/publisher to avoid conflicting with
     // metadata stored in AppFabric.
@@ -247,6 +251,8 @@ public class PreviewRunnerTwillRunnable extends AbstractTwillRunnable {
 
     modules.add(new AuthenticationContextModules().getMasterWorkerModule());
     modules.add(new AuthorizationEnforcementModule().getNoOpModules());
+    modules.add(new AuditLogWriterModule(cConf).getInMemoryModules());
+    modules.add(new UserCredentialAeadEncryptionModule());
 
     byte[] pollerInfoBytes = Bytes.toBytes(new Gson().toJson(pollerInfo));
     modules.add(new AbstractModule() {
@@ -271,5 +277,15 @@ public class PreviewRunnerTwillRunnable extends AbstractTwillRunnable {
     });
 
     return Guice.createInjector(modules);
+  }
+
+  /**
+   * Generates a cryptographically strong random byte array to be used as a secret token.
+   */
+  private byte[] generateSecureToken() {
+    SecureRandom random = new SecureRandom();
+    byte[] token = new byte[32]; // 256 bits
+    random.nextBytes(token);
+    return token;
   }
 }

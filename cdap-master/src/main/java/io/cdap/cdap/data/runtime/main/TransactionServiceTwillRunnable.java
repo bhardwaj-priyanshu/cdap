@@ -22,8 +22,10 @@ import com.google.inject.Guice;
 import com.google.inject.Injector;
 import com.google.inject.multibindings.Multibinder;
 import com.google.inject.name.Names;
+import io.cdap.cdap.app.guice.AuditLogWriterModule;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.DFSLocationModule;
 import io.cdap.cdap.common.guice.IOModule;
@@ -43,7 +45,7 @@ import io.cdap.cdap.data.runtime.main.transaction.TransactionPingHandler;
 import io.cdap.cdap.data2.audit.AuditModule;
 import io.cdap.cdap.logging.appender.LogAppenderInitializer;
 import io.cdap.cdap.logging.guice.KafkaLogAppenderModule;
-import io.cdap.cdap.messaging.guice.MessagingClientModule;
+import io.cdap.cdap.messaging.guice.client.DefaultMessagingClientModule;
 import io.cdap.cdap.metrics.guice.MetricsClientRuntimeModule;
 import io.cdap.cdap.proto.id.NamespaceId;
 import io.cdap.cdap.security.auth.context.AuthenticationContextModules;
@@ -104,7 +106,7 @@ public class TransactionServiceTwillRunnable extends AbstractMasterTwillRunnable
         new ZkClientModule(),
         new ZkDiscoveryModule(),
         new KafkaClientModule(),
-        new MessagingClientModule(),
+        new DefaultMessagingClientModule(),
         new DataFabricModules(txClientId).getDistributedModules(),
         new DataSetsModules().getDistributedModules(),
         new SystemDatasetRuntimeModule().getDistributedModules(),
@@ -116,6 +118,8 @@ public class TransactionServiceTwillRunnable extends AbstractMasterTwillRunnable
         // needed by RemoteDatasetFramework while making an HTTP call to DatasetService
         new AuthorizationEnforcementModule().getDistributedModules(),
         new AuthenticationContextModules().getMasterModule(),
+        new AuditLogWriterModule(cConf).getDistributedModules(),
+        new UserCredentialAeadEncryptionModule(),
         new AbstractModule() {
           @Override
           protected void configure() {

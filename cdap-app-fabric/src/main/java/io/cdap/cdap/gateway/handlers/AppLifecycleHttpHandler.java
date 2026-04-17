@@ -244,7 +244,8 @@ public class AppLifecycleHttpHandler extends AbstractAppLifecycleHttpHandler {
       @QueryParam("nameFilter") String nameFilter,
       @QueryParam("nameFilterType") NameFilterType nameFilterType,
       @QueryParam("latestOnly") @DefaultValue("true") Boolean latestOnly,
-      @QueryParam("sortCreationTime") Boolean sortCreationTime)
+      @QueryParam("sortCreationTime") Boolean sortCreationTime,
+      @QueryParam("enableDefaultPagination") @DefaultValue("false") boolean enableDefaultPagination)
       throws Exception {
 
     validateNamespace(namespaceId);
@@ -256,12 +257,18 @@ public class AppLifecycleHttpHandler extends AbstractAppLifecycleHttpHandler {
       }
     }
 
-    if (Optional.ofNullable(pageSize).orElse(0) != 0) {
+    if (pageSize == null && enableDefaultPagination) {
+      pageSize = configuration.getInt(Constants.GET_APPS_DEFAULT_PAGE_SIZE);
+      LOG.debug("Paginating GET apps call with page size as {}", pageSize);
+    }
+
+    if (Optional.ofNullable(pageSize).orElse(0) > 0) {
+      Integer finalPageSize = pageSize;
       JsonPaginatedListResponder.respond(GSON, responder, APP_LIST_PAGINATED_KEY,
           jsonListResponder -> {
             AtomicReference<ApplicationRecord> lastRecord = new AtomicReference<>(null);
             ScanApplicationsRequest scanRequest = getScanRequest(namespaceId, artifactVersion,
-                pageToken, pageSize,
+                pageToken, finalPageSize,
                 orderBy, nameFilter, names, nameFilterType, latestOnly,
                 sortCreationTime);
             boolean pageLimitReached = applicationLifecycleService.scanApplications(scanRequest,
@@ -486,6 +493,20 @@ public class AppLifecycleHttpHandler extends AbstractAppLifecycleHttpHandler {
       scopes.add(validateScope(scope));
     }
     return scopes;
+  }
+
+  /**
+   * Gets count for all application the namespace.
+   *
+   * <p>This API returns the count for latest applications only.</>
+   */
+  @GET
+  @Path("/apps/count")
+  public void getAppsCount(HttpRequest request, HttpResponder responder,
+      @PathParam("namespace-id") String namespaceId) throws Exception {
+    NamespaceId namespace = validateNamespace(namespaceId);
+    long count = applicationLifecycleService.getApplicationsCount(namespace);
+    responder.sendString(HttpResponseStatus.OK, String.valueOf(count));
   }
 
   /**

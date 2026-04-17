@@ -32,7 +32,6 @@ import io.cdap.cdap.master.spi.environment.MasterEnvironment;
 import io.cdap.cdap.master.spi.environment.MasterEnvironmentContext;
 import io.cdap.cdap.messaging.guice.MessagingServiceModule;
 import io.cdap.cdap.proto.id.NamespaceId;
-import io.cdap.cdap.security.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.security.guice.ExternalAuthenticationModule;
 import java.util.ArrayList;
 import java.util.List;
@@ -49,7 +48,7 @@ public class RouterServiceMain extends AbstractServiceMain<EnvironmentOptions> {
   private static final Logger LOG = LoggerFactory.getLogger(RouterServiceMain.class);
 
   /**
-   * Main entry point
+   * Main entry point.
    */
   public static void main(String[] args) throws Exception {
     main(RouterServiceMain.class, args);
@@ -64,7 +63,6 @@ public class RouterServiceMain extends AbstractServiceMain<EnvironmentOptions> {
     modules.add(new RouterModules().getDistributedModules());
     modules.add(new DFSLocationModule());
     modules.add(new ExternalAuthenticationModule());
-    modules.add(new UserCredentialAeadEncryptionModule());
 
     return modules;
   }

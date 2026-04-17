@@ -20,7 +20,6 @@ import com.google.api.gax.core.CredentialsProvider;
 import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.api.gax.rpc.AlreadyExistsException;
 import com.google.api.gax.rpc.ApiException;
-import com.google.api.gax.rpc.ResourceExhaustedException;
 import com.google.api.gax.rpc.StatusCode;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.WriteChannel;
@@ -49,11 +48,15 @@ import com.google.cloud.storage.StorageOptions;
 import com.google.cloud.storage.StorageRetryStrategy;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
-import com.google.common.base.Strings;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.ByteStreams;
-import io.cdap.cdap.error.api.ErrorTagProvider;
+import io.cdap.cdap.api.exception.ErrorCategory;
+import io.cdap.cdap.api.exception.ErrorCategory.ErrorCategoryEnum;
+import io.cdap.cdap.api.exception.ErrorCodeType;
+import io.cdap.cdap.api.exception.ErrorType;
+import io.cdap.cdap.api.exception.ErrorUtils;
+import io.cdap.cdap.api.exception.ErrorUtils.ActionErrorPair;
+import io.cdap.cdap.api.exception.ProgramFailureException;
 import io.cdap.cdap.runtime.spi.CacheableLocalFile;
 import io.cdap.cdap.runtime.spi.ProgramRunInfo;
 import io.cdap.cdap.runtime.spi.VersionInfo;
@@ -79,8 +82,6 @@ import java.util.Optional;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 import javax.annotation.Nullable;
 import org.apache.twill.api.LocalFile;
 import org.apache.twill.filesystem.LocalLocationFactory;
@@ -115,6 +116,9 @@ public class DataprocRuntimeJobManager implements RuntimeJobManager {
 
   // Dataproc specific error groups
   private static final String ERRGP_GCS = "gcs";
+  private static final String GCS_DOC_URL =
+      "https://cloud.google.com/storage/docs/json_api/v1/status-codes";
+
 
   private final ProvisionerContext provisionerContext;
   private final String clusterName;
@@ -361,29 +365,40 @@ public class DataprocRuntimeJobManager implements RuntimeJobManager {
       }
       DataprocUtils.emitMetric(provisionerContext, submitJobMetric.build());
     } catch (Exception e) {
-      String errorMessage = String.format("Error while launching job %s on cluster %s.",
+      String errorReason = String.format("Error while launching job %s on cluster %s.",
           getJobId(runInfo), clusterName);
       // delete all uploaded gcs files in case of exception
       DataprocUtils.deleteGcsPath(getStorageClient(), bucket, runRootPath);
       DataprocUtils.emitMetric(provisionerContext, submitJobMetric.setException(e).build());
-      // ResourceExhaustedException indicates Dataproc agent running on master node isn't emitting heartbeat.
-      // This usually indicates master VM crashing due to OOM.
-      if (e instanceof ResourceExhaustedException) {
-        String message = String.format("%s Cluster can't accept jobs presently: %s",
-            errorMessage,
-            Throwables.getRootCause(e).getMessage());
-        String helpMessage = DataprocUtils.getTroubleshootingHelpMessage(
-            provisionerProperties.getOrDefault(
-                DataprocUtils.TROUBLESHOOTING_DOCS_URL_KEY,
-                DataprocUtils.TROUBLESHOOTING_DOCS_URL_DEFAULT));
-
-        String combined = Stream.of(message, helpMessage)
-            .filter(s -> !Strings.isNullOrEmpty(s))
-            .collect(Collectors.joining("\n"));
-
-        throw new DataprocRuntimeException(e, combined, ErrorTagProvider.ErrorTag.USER);
+      // ResourceExhaustedException indicates Dataproc agent running on master node
+      // isn't emitting heartbeat. This usually indicates master VM crashing due to OOM.
+      ErrorCategory errorCategory = new ErrorCategory(ErrorCategoryEnum.STARTING);
+      if (e instanceof ApiException) {
+        int statusCode =
+            ((ApiException) e).getStatusCode().getCode().getHttpStatusCode();
+        ErrorUtils.ActionErrorPair pair = ErrorUtils.getActionErrorByStatusCode(statusCode);
+        throw new DataprocRuntimeException.Builder()
+            .withCause(e)
+            .withErrorCategory(errorCategory)
+            .withErrorMessage(e.getMessage())
+            .withErrorReason(DataprocUtils.getErrorReason(errorReason, e))
+            .withErrorType(pair.getErrorType())
+            .withErrorCodeType(ErrorCodeType.HTTP)
+            .withErrorCode(String.valueOf(statusCode))
+            .withDependency(true)
+            .build();
       }
-      throw new DataprocRuntimeException(e, errorMessage);
+      if (DataprocUtils.isFailureDetailsProviderInCausalChain(e)) {
+        // avoid double wrapping
+        throw e;
+      } else {
+        throw new DataprocRuntimeException.Builder()
+            .withErrorMessage(e.getMessage())
+            .withErrorReason(errorReason)
+            .withErrorCategory(errorCategory)
+            .withCause(e)
+            .build();
+      }
     } finally {
       if (disableLocalCaching) {
         DataprocUtils.deleteDirectoryContents(tempDir);
@@ -402,12 +417,16 @@ public class DataprocRuntimeJobManager implements RuntimeJobManager {
           .setJobId(jobId)
           .build());
       return Optional.of(new DataprocRuntimeJobDetail(getProgramRunInfo(job),
-          getRuntimeJobStatus(job),
-          getJobStatusDetails(job)));
+          getRuntimeJobStatus(job), getJobStatusDetails(job), getJobId(programRunInfo)));
     } catch (ApiException e) {
       if (e.getStatusCode().getCode() != StatusCode.Code.NOT_FOUND) {
-        throw new Exception(String.format("Error while getting details for job %s on cluster %s.",
-            jobId, clusterName), e);
+        int code = e.getStatusCode().getCode().getHttpStatusCode();
+        ActionErrorPair pair = ErrorUtils.getActionErrorByStatusCode(code);
+        String errorReason = String.format("%s Unable to get details for job %s on cluster %s. %s",
+            code, jobId, clusterName, pair.getCorrectiveAction());
+        throw ErrorUtils.getProgramFailureException(new ErrorCategory(ErrorCategoryEnum.OTHERS),
+            errorReason, e.getMessage(), pair.getErrorType(), true, ErrorCodeType.HTTP,
+            String.valueOf(code), null, e);
       }
       // Status is not found if job is finished or manually deleted by the user
       LOG.debug("Dataproc job {} does not exist in project {}, region {}.", jobId, projectId,
@@ -550,7 +569,13 @@ public class DataprocRuntimeJobManager implements RuntimeJobManager {
               Storage.BlobWriteOption.metagenerationMatch());
         } catch (StorageException e) {
           if (e.getCode() != HttpURLConnection.HTTP_PRECON_FAILED) {
-            throw e;
+            ActionErrorPair pair = ErrorUtils.getActionErrorByStatusCode(e.getCode());
+            String errorReason = String.format("%s Unable to upload file %s to GCS bucket gs://%s."
+                    + " %s", e.getCode(), localFile.getURI(), bucket, pair.getCorrectiveAction());
+            throw ErrorUtils.getProgramFailureException(
+                new ErrorCategory(ErrorCategoryEnum.STARTING), errorReason, e.getMessage(),
+                pair.getErrorType(), true, ErrorCodeType.HTTP, String.valueOf(e.getCode()),
+                GCS_DOC_URL, e);
           }
           // Precondition failed means file has already been replaced, hence ignore it.
           LOG.debug("Skip uploading file {} to gs://{}/{} because it exists.",
@@ -591,10 +616,26 @@ public class DataprocRuntimeJobManager implements RuntimeJobManager {
     }
     BlobInfo blobInfo = blobInfoBuilder.setContentType(contentType).build();
     Storage storage = getStorageClient();
+    Bucket bucketObj;
+    try {
+       bucketObj = storage.get(bucket);
+    } catch (StorageException e) {
+      ActionErrorPair pair = ErrorUtils.getActionErrorByStatusCode(e.getCode());
+      String errorReason = String.format("%s Unable to access GCS bucket '%s'. %s", e.getCode(),
+          bucket, pair.getCorrectiveAction());
+      throw ErrorUtils.getProgramFailureException(new ErrorCategory(ErrorCategoryEnum.STARTING),
+          errorReason, e.getMessage(), pair.getErrorType(), true,
+          ErrorCodeType.HTTP, String.valueOf(e.getCode()), GCS_DOC_URL, e);
+    }
 
-    Bucket bucketObj = storage.get(bucket);
     if (bucketObj == null) {
-      throw new IOException("GCS bucket '" + bucket + "'does not exists");
+      String error = String.format("GCS Bucket '%s' does not exist", bucket);
+      throw new ProgramFailureException.Builder()
+          .withErrorCategory(new ErrorCategory(ErrorCategoryEnum.STARTING))
+          .withErrorReason(error)
+          .withErrorMessage(error)
+          .withErrorType(ErrorType.USER)
+          .build();
     }
 
     LOG.debug(
@@ -606,7 +647,12 @@ public class DataprocRuntimeJobManager implements RuntimeJobManager {
           Storage.BlobWriteOption.doesNotExist());
     } catch (StorageException e) {
       if (e.getCode() != HttpURLConnection.HTTP_PRECON_FAILED) {
-        throw e;
+        ActionErrorPair pair = ErrorUtils.getActionErrorByStatusCode(e.getCode());
+        String errorReason = String.format("%s Unable to upload file %s to GCS bucket gs://%s. %s",
+            e.getCode(), localFile.getURI(), bucket, pair.getCorrectiveAction());
+        throw ErrorUtils.getProgramFailureException(new ErrorCategory(ErrorCategoryEnum.STARTING),
+            errorReason, e.getMessage(), pair.getErrorType(), true,
+            ErrorCodeType.HTTP, String.valueOf(e.getCode()), GCS_DOC_URL, e);
       }
 
       if (!cacheable) {

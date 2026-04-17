@@ -21,7 +21,7 @@
   <parent>
     <artifactId>cdap</artifactId>
     <groupId>io.cdap.cdap</groupId>
-    <version>6.11.0-SNAPSHOT</version>
+    <version>6.12.0-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
@@ -30,8 +30,8 @@
   <packaging>jar</packaging>
 
   <properties>
-    <guava.version>30.1.1-jre</guava.version>
-    <spanner.version>6.12.2</spanner.version>
+    <guava.version>33.4.0-jre</guava.version>
+    <spanner.version>6.87.0</spanner.version>
   </properties>
 
   <dependencyManagement>
@@ -39,7 +39,7 @@
       <dependency>
         <groupId>com.google.cloud</groupId>
         <artifactId>libraries-bom</artifactId>
-        <version>22.0.0</version>
+        <version>26.55.0</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>
@@ -77,6 +77,16 @@
       <artifactId>logback-classic</artifactId>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.xerial.snappy</groupId>
+      <artifactId>snappy-java</artifactId>
+      <version>1.1.10.7</version>
+    </dependency>
+    <dependency>
+      <groupId>pl.pragmatists</groupId>
+      <artifactId>JUnitParams</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <profiles>
@@ -87,7 +97,7 @@
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-dependency-plugin</artifactId>
-            <version>2.8</version>
+            <version>3.8.1</version>
             <executions>
               <execution>
                 <id>copy-dependencies</id>

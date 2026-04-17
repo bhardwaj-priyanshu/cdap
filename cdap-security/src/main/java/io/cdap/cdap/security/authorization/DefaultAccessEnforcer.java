@@ -26,6 +26,8 @@ import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.conf.Constants.Security.Encryption;
 import io.cdap.cdap.common.conf.SConfiguration;
+import io.cdap.cdap.common.encryption.AeadCipher;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.proto.element.EntityType;
 import io.cdap.cdap.proto.id.EntityId;
 import io.cdap.cdap.proto.id.InstanceId;
@@ -36,8 +38,6 @@ import io.cdap.cdap.proto.security.GrantedPermission;
 import io.cdap.cdap.proto.security.Permission;
 import io.cdap.cdap.proto.security.Principal;
 import io.cdap.cdap.proto.security.Role;
-import io.cdap.cdap.security.encryption.AeadCipher;
-import io.cdap.cdap.security.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.security.impersonation.SecurityUtil;
 import io.cdap.cdap.security.spi.authentication.AuthenticationContext;
 import io.cdap.cdap.security.spi.authorization.AccessEnforcer;
@@ -46,7 +46,6 @@ import io.cdap.cdap.security.spi.authorization.AuthorizedResult;
 import io.cdap.cdap.security.spi.encryption.CipherException;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -242,9 +241,7 @@ public class DefaultAccessEnforcer extends AbstractAccessEnforcer implements Rol
     try {
       Map<? extends EntityId, AuthorizationResponse> mapOfEntityResult =
         accessControllerInstantiator.get().isVisible(difference, principal);
-      List<AuthorizationResponse> checkResults = mapOfEntityResult.values().stream()
-        .collect(Collectors.toList());
-      AuthorizationUtil.setAuthorizationDataInContext(checkResults);
+      AuthorizationUtil.setIsVisibleCheckResultsInContext(mapOfEntityResult);
       moreVisibleEntities = mapOfEntityResult.entrySet()
           .stream()
           .filter(entry -> entry.getValue().isAuthorized() != AuthorizationResponse.AuthorizationStatus.UNAUTHORIZED)

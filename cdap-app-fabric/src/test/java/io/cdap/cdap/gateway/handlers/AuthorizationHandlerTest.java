@@ -25,6 +25,7 @@ import io.cdap.cdap.client.config.ConnectionConfig;
 import io.cdap.cdap.common.FeatureDisabledException;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.NoOpAeadCipher;
 import io.cdap.cdap.common.http.CommonNettyHttpServiceBuilder;
 import io.cdap.cdap.common.metrics.NoOpMetricsCollectionService;
 import io.cdap.cdap.proto.element.EntityType;
@@ -40,7 +41,6 @@ import io.cdap.cdap.proto.security.Role;
 import io.cdap.cdap.proto.security.StandardPermission;
 import io.cdap.cdap.security.auth.context.MasterAuthenticationContext;
 import io.cdap.cdap.security.authorization.AuthorizationContextFactory;
-//import io.cdap.cdap.security.authorization.InMemoryAccessController;
 import io.cdap.cdap.security.authorization.InMemoryPermissionManager;
 import io.cdap.cdap.security.authorization.InMemoryRoleController;
 import io.cdap.cdap.security.authorization.NoOpAuthorizationContextFactory;
@@ -85,7 +85,8 @@ public class AuthorizationHandlerTest {
     final InMemoryPermissionManager auth = new InMemoryPermissionManager();
     final InMemoryRoleController inMemoryRoleController = new InMemoryRoleController();
     //    auth.initialize(FACTORY.create(properties)); //Will be used on migration to SPI implementation
-    service = new CommonNettyHttpServiceBuilder(conf, getClass().getSimpleName(), new NoOpMetricsCollectionService())
+    service = new CommonNettyHttpServiceBuilder(conf, getClass().getSimpleName(), new NoOpMetricsCollectionService(),
+                        true, auditLogContexts -> {}, new NoOpAeadCipher())
       .setHttpHandlers(new AuthorizationHandler(auth, conf, new MasterAuthenticationContext(), inMemoryRoleController))
       .setChannelPipelineModifier(new ChannelPipelineModifier() {
         @Override
@@ -134,7 +135,10 @@ public class AuthorizationHandlerTest {
     final InMemoryPermissionManager accessController = new InMemoryPermissionManager();
     final InMemoryRoleController inMemoryRoleController = new InMemoryRoleController();
     NettyHttpService service = new CommonNettyHttpServiceBuilder(cConf, getClass().getSimpleName(),
-                                                                 new NoOpMetricsCollectionService())
+                                                                 new NoOpMetricsCollectionService(),
+                                                                 true,
+                                                                 auditLogContexts -> {},
+                                                                  new NoOpAeadCipher())
       .setHttpHandlers(new AuthorizationHandler(
         accessController, cConf, new MasterAuthenticationContext(), inMemoryRoleController))
       .build();

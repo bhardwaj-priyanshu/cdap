@@ -41,9 +41,11 @@ import io.cdap.cdap.common.app.RunIds;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.conf.Constants.RuntimeMonitor;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.LocalLocationModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.io.DatumReader;
 import io.cdap.cdap.common.io.DatumWriter;
@@ -189,7 +191,9 @@ public class RuntimeClientServiceTest {
             bind(DiscoveryService.class).toInstance(discoveryService);
             bind(DiscoveryServiceClient.class).toInstance(discoveryService);
           }
-        }
+        },
+        new NoOpAuditLogModule(),
+        new UserCredentialAeadEncryptionModule()
     );
 
     messagingService = injector.getInstance(MessagingService.class);
@@ -222,6 +226,8 @@ public class RuntimeClientServiceTest {
         new AuthorizationEnforcementModule().getNoOpModules(),
         new AuthenticationContextModules().getNoOpModule(),
         new IOModule(),
+        new NoOpAuditLogModule(),
+        new UserCredentialAeadEncryptionModule(),
         new AbstractModule() {
           @Override
           protected void configure() {

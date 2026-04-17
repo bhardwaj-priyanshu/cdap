@@ -27,10 +27,19 @@ import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageBatch;
 import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
+import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.CharStreams;
+import io.cdap.cdap.api.exception.ErrorCategory;
+import io.cdap.cdap.api.exception.ErrorCodeType;
+import io.cdap.cdap.api.exception.ErrorType;
+import io.cdap.cdap.api.exception.ErrorUtils;
+import io.cdap.cdap.api.exception.FailureDetailsProvider;
 import io.cdap.cdap.runtime.spi.provisioner.ProvisionerContext;
 import io.cdap.cdap.runtime.spi.provisioner.ProvisionerMetrics;
+import io.cdap.cdap.runtime.spi.provisioner.RetryableProvisionException;
+import io.cdap.cdap.runtime.spi.provisioner.dataproc.DataprocRetryableException;
+import io.cdap.cdap.runtime.spi.provisioner.dataproc.DataprocRuntimeException;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -80,11 +89,6 @@ public final class DataprocUtils {
   private static final int SET_CUSTOM_TIME_MAX_RETRY = 6;
   private static final int SET_CUSTOM_TIME_MAX_SLEEP_MILLIS_BEFORE_RETRY = 20000;
 
-  public static final String TROUBLESHOOTING_DOCS_URL_KEY = "troubleshootingDocsURL";
-  // Empty url will ensure help messages don't appear by default in Dataproc error messages.
-  // This property needs to be overridden in cdap-site.
-  public static final String TROUBLESHOOTING_DOCS_URL_DEFAULT = "";
-
   /**
    * resources required by Runtime Job (io.cdap.cdap.runtime.spi.runtimejob.RuntimeJob) that will be
    * running on driver pool nodes.
@@ -118,6 +122,23 @@ public final class DataprocUtils {
   // keys cannot be empty
   private static final Pattern LABEL_KEY_PATTERN = Pattern.compile("^[a-z][a-z0-9_-]{0,62}$");
   private static final Pattern LABEL_VAL_PATTERN = Pattern.compile("^[a-z0-9_-]{0,63}$");
+  // HTTP status code to gRPC status code mapping
+  private static final Map<Integer, Integer> grpcToHttpMap =
+      new ImmutableMap.Builder<Integer, Integer>()
+          .put(1, 499) // CANCELLED
+          .put(3, 400) // INVALID_ARGUMENT
+          .put(4, 504) // DEADLINE_EXCEEDED
+          .put(5, 404) // NOT_FOUND
+          .put(7, 403) // PERMISSION_DENIED
+          .put(8, 409) // RESOURCE_EXHAUSTED
+          .put(9, 400) // FAILED_PRECONDITION
+          .put(10, 409) // ABORTED
+          .put(11, 400) // OUT_OF_RANGE
+          .put(12, 501) // UNIMPLEMENTED
+          .put(13, 500) // INTERNAL
+          .put(14, 503) // UNAVAILABLE
+          .put(16, 401) // UNAUTHENTICATED
+          .build();
 
   public interface ConnectionProvider {
     HttpURLConnection getConnection(URL url) throws IOException;
@@ -255,14 +276,23 @@ public final class DataprocUtils {
   /**
    * Get network from the metadata server.
    */
-  public static String getSystemNetwork(ConnectionProvider connectionProvider) {
+  public static String getSystemNetwork(ConnectionProvider connectionProvider,
+      ErrorCategory errorCategory) {
     try {
       String network = getMetadata(connectionProvider, "instance/network-interfaces/0/network");
       // will be something like projects/<project-number>/networks/default
       return network.substring(network.lastIndexOf('/') + 1);
-    } catch (IOException e) {
-      throw new IllegalArgumentException("Unable to get the network from the environment. "
-          + "Please explicitly set the network.", e);
+    } catch (Exception e) {
+      String errorReason = "Unable to get the network from the environment. "
+          + "Please explicitly set the network.";
+      throw new DataprocRuntimeException.Builder()
+          .withCause(e)
+          .withErrorCategory(errorCategory)
+          .withErrorReason(errorReason)
+          .withErrorMessage(String.format("%s with message: %s", errorReason, e.getMessage()))
+          .withDependency(true)
+          .withErrorType(ErrorType.USER)
+          .build();
     }
   }
 
@@ -274,9 +304,17 @@ public final class DataprocUtils {
       String zone = getMetadata(connectionProvider, "instance/zone");
       // will be something like projects/<project-number>/zones/us-east1-b
       return zone.substring(zone.lastIndexOf('/') + 1);
-    } catch (IOException e) {
-      throw new IllegalArgumentException("Unable to get the zone from the environment. "
-          + "Please explicitly set the zone.", e);
+    } catch (Exception e) {
+      String errorReason = "Unable to get the zone from the environment. "
+          + "Please explicitly set the zone.";
+      throw new DataprocRuntimeException.Builder()
+          .withCause(e)
+          .withErrorCategory(DataprocRuntimeException.ERROR_CATEGORY_PROVISIONING_CONFIGURATION)
+          .withErrorReason(errorReason)
+          .withErrorMessage(String.format("%s with message: %s", errorReason, e.getMessage()))
+          .withDependency(true)
+          .withErrorType(ErrorType.USER)
+          .build();
     }
   }
 
@@ -286,8 +324,14 @@ public final class DataprocUtils {
   public static String getRegionFromZone(String zone) {
     int idx = zone.lastIndexOf("-");
     if (idx <= 0) {
-      throw new IllegalArgumentException(
-          "Invalid zone. Zone must be in the format of <region>-<zone-name>");
+      String errorReason = "Invalid zone. Zone must be in the format of <region>-<zone-name>";
+      throw new DataprocRuntimeException.Builder()
+          .withErrorCategory(DataprocRuntimeException.ERROR_CATEGORY_PROVISIONING_CONFIGURATION)
+          .withErrorReason(errorReason)
+          .withErrorMessage(errorReason)
+          .withDependency(true)
+          .withErrorType(ErrorType.USER)
+          .build();
     }
     return zone.substring(0, idx);
   }
@@ -295,12 +339,21 @@ public final class DataprocUtils {
   /**
    * Get project id from the metadata server.
    */
-  public static String getSystemProjectId(ConnectionProvider connectionProvider) {
+  public static String getSystemProjectId(ConnectionProvider connectionProvider,
+      ErrorCategory errorCategory) {
     try {
       return getMetadata(connectionProvider, "project/project-id");
-    } catch (IOException e) {
-      throw new IllegalArgumentException("Unable to get project id from the environment. "
-          + "Please explicitly set the project id and account key.", e);
+    } catch (Exception e) {
+      String errorReason = "Unable to get project id from the environment. "
+          + "Please explicitly set the project id and account key.";
+      throw new DataprocRuntimeException.Builder()
+          .withCause(e)
+          .withErrorCategory(errorCategory)
+          .withErrorReason(errorReason)
+          .withErrorMessage(e.getMessage())
+          .withDependency(true)
+          .withErrorType(ErrorType.USER)
+          .build();
     }
   }
 
@@ -402,7 +455,9 @@ public final class DataprocUtils {
     if (exception instanceof IOException) {
       throw (IOException) exception;
     }
-    throw new RuntimeException("Error fetching metadata from server", exception);
+    throw new RuntimeException(
+        String.format("Error fetching metadata from server with response code: %s", statusCode),
+        exception);
   }
 
   /**
@@ -507,17 +562,65 @@ public final class DataprocUtils {
   }
 
   /**
-   * Get a user friendly message pointing to an external troubleshooting doc.
-   *
-   * @param troubleshootingDocsUrl Url for the troubleshooting doc
-   * @return user friendly message pointing to an external troubleshooting doc.
+   * Returns error reason as {@link String} based on {@link ApiException} status code.
    */
-  public static String getTroubleshootingHelpMessage(@Nullable String troubleshootingDocsUrl) {
-    if (Strings.isNullOrEmpty(troubleshootingDocsUrl)) {
-      return "";
+  public static String getErrorReason(String reason, Throwable e) {
+    if (!(e instanceof ApiException)) {
+      return reason;
     }
-    return String.format("For troubleshooting Dataproc errors, refer to %s",
-        troubleshootingDocsUrl);
+    ApiException ex = (ApiException) e;
+    int statusCode = ex.getStatusCode().getCode().getHttpStatusCode();
+    StringBuilder message = new StringBuilder();
+    message.append(String.format("%s %s", statusCode, reason));
+    if (!Strings.isNullOrEmpty(ex.getReason())) {
+      message.append(String.format(": %s", ex.getReason()));
+    }
+    message.append(String.format(". %s",
+        ErrorUtils.getActionErrorByStatusCode(statusCode).getCorrectiveAction()));
+    return message.toString();
+  }
+
+  /**
+   * Returns {@link DataprocRuntimeException} or throws {@link RetryableProvisionException}
+   * based on {@link ApiException} status code.
+   */
+  public static DataprocRuntimeException handleApiException(@Nullable String operationId,
+      ApiException e, String errorReason, ErrorCategory errorCategory)
+      throws RetryableProvisionException {
+    if (e.getStatusCode().getCode().getHttpStatusCode() / 100 != 4) {
+      throw new DataprocRetryableException(operationId, e);
+    }
+    int statusCode = e.getStatusCode().getCode().getHttpStatusCode();
+    ErrorUtils.ActionErrorPair pair = ErrorUtils.getActionErrorByStatusCode(statusCode);
+    return new DataprocRuntimeException.Builder()
+        .withCause(e)
+        .withErrorCategory(errorCategory)
+        .withOperationId(operationId)
+        .withErrorMessage(e.getMessage())
+        .withErrorReason(getErrorReason(errorReason, e))
+        .withErrorType(pair.getErrorType())
+        .withErrorCodeType(ErrorCodeType.HTTP)
+        .withErrorCode(String.valueOf(statusCode))
+        .withDependency(true)
+        .build();
+  }
+
+  /**
+   * Returns a boolean true if {@link FailureDetailsProvider} is present in causal chain,
+   * otherwise false.
+   */
+  public static boolean isFailureDetailsProviderInCausalChain(Throwable e) {
+    List<Throwable> causalChain = Throwables.getCausalChain(e);
+    for (Throwable cause : causalChain) {
+      if (cause instanceof FailureDetailsProvider) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public static Integer getHttpCode(int code) {
+    return grpcToHttpMap.getOrDefault(code, 500);
   }
 
   private DataprocUtils() {

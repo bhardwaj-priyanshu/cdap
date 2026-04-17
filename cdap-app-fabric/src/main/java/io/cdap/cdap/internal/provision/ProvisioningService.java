@@ -23,6 +23,11 @@ import com.google.common.util.concurrent.AbstractIdleService;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 import com.google.inject.Inject;
+import io.cdap.cdap.api.exception.ErrorCategory;
+import io.cdap.cdap.api.exception.ErrorCategory.ErrorCategoryEnum;
+import io.cdap.cdap.api.exception.ErrorType;
+import io.cdap.cdap.api.exception.ErrorUtils;
+import io.cdap.cdap.api.exception.ProgramFailureException;
 import io.cdap.cdap.api.macro.InvalidMacroException;
 import io.cdap.cdap.api.macro.MacroEvaluator;
 import io.cdap.cdap.api.macro.MacroParserOptions;
@@ -111,6 +116,9 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Service for provisioning related operations.
+ *
+ * <p>TODO (CDAP-21111): Split ProvisioningService for Appfabric Server and Appfabric
+ * Processor.</p>
  */
 public class ProvisioningService extends AbstractIdleService {
 
@@ -195,10 +203,10 @@ public class ProvisioningService extends AbstractIdleService {
   /**
    * Returns the {@link ClusterStatus} for the cluster being used to execute the given program run.
    *
-   * @param programRunId the program run id for checking the cluster status
+   * @param programRunId   the program run id for checking the cluster status
    * @param programOptions the program options for the given run
-   * @param cluster the {@link Cluster} information for the given run
-   * @param userId the user id to use for {@link SecureStore} operation.
+   * @param cluster        the {@link Cluster} information for the given run
+   * @param userId         the user id to use for {@link SecureStore} operation.
    * @return the {@link ClusterStatus}
    * @throws Exception if non-retryable exception is encountered when querying cluster status
    */
@@ -224,7 +232,7 @@ public class ProvisioningService extends AbstractIdleService {
             Networks.getAddress(cConf, Constants.NETWORK_PROXY_ADDRESS), null, null);
       }
       context = createContext(cConf, programOptions, programRunId, userId, properties,
-          defaultSSHContext);
+          defaultSSHContext, new ErrorCategory(ErrorCategoryEnum.OTHERS));
     } catch (InvalidMacroException e) {
       // This shouldn't happen
       runWithProgramLogging(programRunId, systemArgs,
@@ -349,7 +357,7 @@ public class ProvisioningService extends AbstractIdleService {
    * using their own executor.
    *
    * @param provisionRequest the provision request
-   * @param context context for the transaction
+   * @param context          context for the transaction
    * @return runnable that will actually execute the cluster provisioning
    */
   public Runnable provision(ProvisionRequest provisionRequest, StructuredTableContext context)
@@ -361,15 +369,18 @@ public class ProvisioningService extends AbstractIdleService {
     Map<String, String> args = programOptions.getArguments().asMap();
     String name = SystemArguments.getProfileProvisioner(args);
     Provisioner provisioner = provisionerInfo.get().provisioners.get(name);
+    ErrorCategory errorCategory = new ErrorCategory(ErrorCategoryEnum.PROVISIONING);
     // any errors seen here will transition the state straight to deprovisioned since no cluster create was attempted
     if (provisioner == null) {
+      String errorMessage = String.format("Could not provision cluster for the run because "
+          + "provisioner %s does not exist.", name);
+      String errorReason = String.format("Provisioner %s does not exist.", name);
+      ProgramFailureException ex = ErrorUtils.getProgramFailureException(errorCategory, errorReason,
+          errorMessage, ErrorType.SYSTEM, false, null);
       runWithProgramLogging(
           programRunId, args,
-          () -> LOG.error(
-              "Could not provision cluster for the run because provisioner {} does not exist.",
-              name));
-      programStateWriter.error(programRunId,
-          new IllegalStateException("Provisioner does not exist."));
+          () -> LOG.error(errorMessage, ex));
+      programStateWriter.error(programRunId, ex);
       provisionerNotifier.deprovisioned(programRunId);
       return () -> {
       };
@@ -383,15 +394,17 @@ public class ProvisioningService extends AbstractIdleService {
       Set<PluginRequirement> unfulfilledRequirements =
           getUnfulfilledRequirements(provisioner.getCapabilities(), requirements);
       if (!unfulfilledRequirements.isEmpty()) {
+        String errorMessage = String.format("'%s' cannot be run using profile '%s' because "
+                + "the profile does not met all plugin requirements. Following requirements "
+                + "were not meet by the listed plugins: '%s'", programRunId.getProgram(), name,
+            groupByRequirement(unfulfilledRequirements));
+        String errorReason = String.format("Provisioner %s does not meet all the requirements for "
+            + "the program %s to run.", name, programRunId.getProgram());
+        ProgramFailureException ex = ErrorUtils.getProgramFailureException(errorCategory, errorReason,
+            errorMessage, ErrorType.SYSTEM, false, null);
         runWithProgramLogging(programRunId, args, () ->
-            LOG.error(String.format(
-                "'%s' cannot be run using profile '%s' because the profile does not met all "
-                    + "plugin requirements. Following requirements were not meet by the listed "
-                    + "plugins: '%s'", programRunId.getProgram(), name,
-                groupByRequirement(unfulfilledRequirements))));
-        programStateWriter.error(programRunId,
-            new IllegalArgumentException("Provisioner does not meet all the "
-                + "requirements for the program to run."));
+            LOG.error(errorMessage, ex));
+        programStateWriter.error(programRunId, ex);
         provisionerNotifier.deprovisioned(programRunId);
         return () -> {
         };
@@ -406,8 +419,7 @@ public class ProvisioningService extends AbstractIdleService {
             programOptions,
             properties, name, provisionRequest.getUser(), provisioningOp,
             createKeysDirectory(programRunId).toURI(), null);
-    ProvisionerTable provisionerTable = new ProvisionerTable(context);
-    provisionerTable.putTaskInfo(provisioningTaskInfo);
+    provisionerStore.putTaskInfo(provisioningTaskInfo);
     return createProvisionTask(provisioningTaskInfo, provisioner);
   }
 
@@ -426,7 +438,7 @@ public class ProvisioningService extends AbstractIdleService {
     String user = programOptions.getArguments().getOption(ProgramOptionConstants.USER_ID);
     Map<String, String> properties = SystemArguments.getProfileProperties(systemArgs);
     ProvisionerContext context = createContext(cConf, programOptions, programRunId, user,
-        properties, null);
+        properties, null, new ErrorCategory(ErrorCategoryEnum.OTHERS));
     return provisioner.getRuntimeJobManager(context)
         .map(manager ->
             new RuntimeJobManagerCallWrapper(provisioner.getClass().getClassLoader(), manager));
@@ -494,8 +506,7 @@ public class ProvisioningService extends AbstractIdleService {
         ProvisioningOp.Status.REQUESTING_DELETE);
     ProvisioningTaskInfo provisioningTaskInfo = new ProvisioningTaskInfo(existing, provisioningOp,
         existing.getCluster());
-    ProvisionerTable provisionerTable = new ProvisionerTable(context);
-    provisionerTable.putTaskInfo(provisioningTaskInfo);
+    provisionerStore.putTaskInfo(provisioningTaskInfo);
 
     return createDeprovisionTask(provisioningTaskInfo, provisioner, taskCleanup);
   }
@@ -663,6 +674,7 @@ public class ProvisioningService extends AbstractIdleService {
     ProgramRunId programRunId = taskInfo.getProgramRunId();
     ProgramOptions programOptions = taskInfo.getProgramOptions();
     Map<String, String> systemArgs = programOptions.getArguments().asMap();
+    ErrorCategory errorCategory = new ErrorCategory(ErrorCategoryEnum.PROVISIONING);
     ProvisionerContext context;
     try {
       SSHContext sshContext = new DefaultSSHContext(
@@ -670,21 +682,29 @@ public class ProvisioningService extends AbstractIdleService {
           locationFactory.create(taskInfo.getSecureKeysDir()),
           createSSHKeyPair(taskInfo));
       context = createContext(cConf, programOptions, programRunId, taskInfo.getUser(),
-          taskInfo.getProvisionerProperties(), sshContext);
+          taskInfo.getProvisionerProperties(), sshContext, errorCategory);
     } catch (IOException e) {
+      String errorReason = "Failed to load ssh key.";
+      String errorMessage =
+          String.format("Failed to load ssh key with message: %s", e.getMessage());
+      Exception ex = ErrorUtils.getProgramFailureException(errorCategory, errorReason,
+          errorMessage, ErrorType.SYSTEM, false, e);
       runWithProgramLogging(taskInfo.getProgramRunId(), systemArgs,
-          () -> LOG.error("Failed to load ssh key. The run will be marked as failed.", e));
-      programStateWriter.error(programRunId,
-          new IllegalStateException("Failed to load ssh key.", e));
+          () -> LOG.error("The run will be marked as failed.", ex));
+      programStateWriter.error(programRunId, ex);
       provisionerNotifier.deprovisioning(taskInfo.getProgramRunId());
       return () -> {
       };
     } catch (InvalidMacroException e) {
-      runWithProgramLogging(taskInfo.getProgramRunId(), systemArgs,
-          () -> LOG.error("Could not evaluate macros while provisoning. "
-              + "The run will be marked as failed.", e));
-      programStateWriter.error(programRunId,
-          new IllegalStateException("Could not evaluate macros while provisioning", e));
+      String errorReason = "Could not evaluate macros while provisioning.";
+      String errorMessage = String.format("Could not evaluate macros with message: %s",
+          e.getMessage());
+      ProgramFailureException ex = ErrorUtils.getProgramFailureException(errorCategory, errorReason,
+          errorMessage, ErrorType.USER, false, null);
+      ex.addSuppressed(e);
+      runWithProgramLogging(programRunId, systemArgs,
+          () -> LOG.error("The run will be marked as failed.", ex));
+      programStateWriter.error(programRunId, ex);
       provisionerNotifier.deprovisioning(taskInfo.getProgramRunId());
       return () -> {
       };
@@ -692,7 +712,7 @@ public class ProvisioningService extends AbstractIdleService {
 
     // TODO: (CDAP-13246) pick up timeout from profile instead of hardcoding
     ProvisioningTask task = new ProvisionTask(taskInfo, transactionRunner, provisioner, context,
-        provisionerNotifier, programStateWriter, 300);
+        provisionerNotifier, programStateWriter, provisionerStore, 300);
 
     ProvisioningTaskKey taskKey = new ProvisioningTaskKey(programRunId,
         ProvisioningOp.Type.PROVISION);
@@ -713,13 +733,20 @@ public class ProvisioningService extends AbstractIdleService {
   private Runnable createDeprovisionTask(ProvisioningTaskInfo taskInfo, Provisioner provisioner,
       Consumer<ProgramRunId> taskCleanup) {
     Map<String, String> properties = taskInfo.getProvisionerProperties();
+    ErrorCategory errorCategory = new ErrorCategory(ErrorCategoryEnum.DEPROVISIONING);
     ProvisionerContext context;
 
     SSHKeyPair sshKeyPair = null;
     try {
       sshKeyPair = createSSHKeyPair(taskInfo);
     } catch (IOException e) {
-      LOG.warn("Failed to load ssh key. No SSH key will be available for the deprovision task", e);
+      String errorReason = "Failed to load ssh key.";
+      String errorMessage =
+          String.format("Failed to load ssh key with message: %s", e.getMessage());
+      Exception ex = ErrorUtils.getProgramFailureException(errorCategory, errorReason,
+          errorMessage, ErrorType.SYSTEM, false, e);
+      LOG.warn("Failed to load ssh key. No SSH key will be available for the deprovision task",
+          ex);
     }
 
     ProgramRunId programRunId = taskInfo.getProgramRunId();
@@ -730,18 +757,22 @@ public class ProvisioningService extends AbstractIdleService {
           Networks.getAddress(cConf, Constants.NETWORK_PROXY_ADDRESS),
           null, sshKeyPair);
       context = createContext(cConf, taskInfo.getProgramOptions(), programRunId, taskInfo.getUser(),
-          properties,
-          sshContext);
+          properties, sshContext, errorCategory);
     } catch (InvalidMacroException e) {
+      String errorReason = "Could not evaluate macros while deprovisioning.";
+      String errorMessage = String.format("Could not evaluate macros with message: %s",
+          e.getMessage());
+      ProgramFailureException ex = ErrorUtils.getProgramFailureException(errorCategory, errorReason,
+          errorMessage, ErrorType.USER, false, null);
+      ex.addSuppressed(e);
       runWithProgramLogging(programRunId, systemArgs,
-          () -> LOG.error("Could not evaluate macros while deprovisoning. "
-              + "The cluster will be marked as orphaned.", e));
+          () -> LOG.error("The cluster will be marked as orphaned.", ex));
       provisionerNotifier.orphaned(programRunId);
       return () -> {
       };
     }
     DeprovisionTask task = new DeprovisionTask(taskInfo, transactionRunner, 300,
-        provisioner, context, provisionerNotifier, locationFactory);
+        provisioner, provisionerStore, context, provisionerNotifier, locationFactory);
     ProvisioningTaskKey taskKey = new ProvisioningTaskKey(programRunId,
         ProvisioningOp.Type.DEPROVISION);
 
@@ -848,9 +879,8 @@ public class ProvisioningService extends AbstractIdleService {
   }
 
   private ProvisionerContext createContext(CConfiguration cConf, ProgramOptions programOptions,
-      ProgramRunId programRunId, String userId,
-      Map<String, String> properties,
-      @Nullable SSHContext sshContext) {
+      ProgramRunId programRunId, String userId, Map<String, String> properties,
+      @Nullable SSHContext sshContext, ErrorCategory errorCategory) {
     RuntimeMonitorType runtimeMonitorType = SystemArguments.getRuntimeMonitorType(cConf,
         programOptions);
     Map<String, String> systemArgs = programOptions.getArguments().asMap();
@@ -864,9 +894,8 @@ public class ProvisioningService extends AbstractIdleService {
     LoggingContext loggingContext = LoggingContextHelper.getLoggingContextWithRunId(programRunId,
         systemArgs);
     return new DefaultProvisionerContext(programRunId, provisionerName, evaluated, sparkCompat,
-        sshContext,
-        appCDAPVersion, locationFactory, runtimeMonitorType,
-        metricsCollectionService, profileName, contextExecutor, loggingContext);
+        sshContext, appCDAPVersion, locationFactory, runtimeMonitorType, metricsCollectionService,
+        profileName, contextExecutor, loggingContext, errorCategory);
   }
 
   /**

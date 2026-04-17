@@ -19,6 +19,8 @@ package io.cdap.cdap.runtime.spi.provisioner.dataproc;
 import com.google.cloud.dataproc.v1.ClusterOperationMetadata;
 import com.google.cloud.dataproc.v1.ClusterStatus.State;
 import com.google.common.collect.ImmutableMap;
+import io.cdap.cdap.api.exception.ErrorCategory;
+import io.cdap.cdap.api.exception.ErrorCategory.ErrorCategoryEnum;
 import io.cdap.cdap.runtime.spi.MockVersionInfo;
 import io.cdap.cdap.runtime.spi.ProgramRunInfo;
 import io.cdap.cdap.runtime.spi.SparkCompat;
@@ -70,7 +72,7 @@ public class DataprocProvisionerTest {
 
   @Before
   public void init() {
-    provisioner = new DataprocProvisioner((conf, requireSsh) -> dataprocClient);
+    provisioner = new DataprocProvisioner((conf, requireSsh, errorCategory) -> dataprocClient);
     MockProvisionerSystemContext provisionerSystemContext = new MockProvisionerSystemContext();
 
     // default system properties defined by DataprocProvisioner
@@ -270,20 +272,20 @@ public class DataprocProvisionerTest {
     ));
 
     context.setSparkCompat(SparkCompat.SPARK3_2_12);
-    Assert.assertEquals("2.1", provisioner.getImageVersion(context, defaultConf));
+    Assert.assertEquals("2.3", provisioner.getImageVersion(context, defaultConf));
     Assert.assertEquals("explicit", provisioner.getImageVersion(context, explicitVersionConf));
 
     context.setAppCDAPVersionInfo(new MockVersionInfo("6.5.0"));
-    Assert.assertEquals("2.1", provisioner.getImageVersion(context, defaultConf));
+    Assert.assertEquals("2.3", provisioner.getImageVersion(context, defaultConf));
     Assert.assertEquals("explicit", provisioner.getImageVersion(context, explicitVersionConf));
 
     context.setAppCDAPVersionInfo(new MockVersionInfo("6.4.0"));
-    Assert.assertEquals("2.1", provisioner.getImageVersion(context, defaultConf));
+    Assert.assertEquals("2.3", provisioner.getImageVersion(context, defaultConf));
     Assert.assertEquals("explicit", provisioner.getImageVersion(context, explicitVersionConf));
 
     //Doublecheck we still get 2.1 for Spark 3 even with CDAP 6.4
     context.setSparkCompat(SparkCompat.SPARK3_2_12);
-    Assert.assertEquals("2.1", provisioner.getImageVersion(context, defaultConf));
+    Assert.assertEquals("2.3", provisioner.getImageVersion(context, defaultConf));
 
   }
 
@@ -306,11 +308,12 @@ public class DataprocProvisionerTest {
     context.setProgramRunInfo(programRunInfo);
     context.setSparkCompat(SparkCompat.SPARK3_2_12);
     context.addProperty(DataprocConf.CLUSTER_REUSE_ENABLED, "false");
+    context.setErrorCategory(new ErrorCategory(ErrorCategoryEnum.PROVISIONING));
 
     Mockito.when(dataprocClient.getCluster("cdap-app-runId"))
         .thenReturn(Optional.empty());
     Mockito.when(dataprocClient.createCluster(Mockito.eq("cdap-app-runId"),
-            Mockito.eq("2.1"), addedLabelsCaptor.capture(), Mockito.eq(false),
+            Mockito.eq("2.3"), addedLabelsCaptor.capture(), Mockito.eq(false),
             Mockito.any()))
       .thenReturn(ClusterOperationMetadata.getDefaultInstance());
     Cluster expectedCluster = new Cluster(
@@ -342,11 +345,11 @@ public class DataprocProvisionerTest {
       .setRun("runId")
       .build();
     context.setProgramRunInfo(programRunInfo);
+    context.setErrorCategory(new ErrorCategory(ErrorCategoryEnum.PROVISIONING));
 
     //A. Check with existing client, probably after a retry
     Mockito.when(dataprocClient.getClusters(
-            Collections.singletonMap(AbstractDataprocProvisioner.LABEL_RUN_KEY,
-                "cdap-app-runId")))
+            Collections.singletonMap(AbstractDataprocProvisioner.LABEL_RUN_KEY, "cdap-app-runId")))
         .thenAnswer(i -> Stream.of(cluster));
     Mockito.when(cluster.getStatus())
         .thenReturn(ClusterStatus.RUNNING);
@@ -364,8 +367,7 @@ public class DataprocProvisionerTest {
         AbstractDataprocProvisioner.LABEL_REUSE_KEY, conf.getClusterReuseKey(),
         AbstractDataprocProvisioner.LABEL_PROFILE, "testProfile");
 
-    Mockito.when(dataprocClient.getClusters(Mockito.eq(reuseClusterFilter),
-            Mockito.any()))
+    Mockito.when(dataprocClient.getClusters(Mockito.eq(reuseClusterFilter), Mockito.any()))
         //B.1. When there is no good cluster found, a retry should happen
         .thenAnswer(i -> {
           //Ensure we call the predicate
@@ -389,9 +391,8 @@ public class DataprocProvisionerTest {
 
     Mockito.verify(dataprocClient)
         .updateClusterLabels("cluster2",
-            Collections.singletonMap(AbstractDataprocProvisioner.LABEL_RUN_KEY,
-                "cdap-app-runId"), Collections.singleton(
-                AbstractDataprocProvisioner.LABEL_REUSE_UNTIL));
+            Collections.singletonMap(AbstractDataprocProvisioner.LABEL_RUN_KEY, "cdap-app-runId"),
+            Collections.singleton(AbstractDataprocProvisioner.LABEL_REUSE_UNTIL));
   }
 
   @Test
@@ -401,6 +402,7 @@ public class DataprocProvisionerTest {
     context.addProperty("region", "testRegion");
     context.addProperty("idleTTL", "5");
     context.addProperty(DataprocConf.SKIP_DELETE, "true");
+    context.setErrorCategory(new ErrorCategory(ErrorCategoryEnum.DEPROVISIONING));
     DataprocConf conf = DataprocConf.create(
         provisioner.createContextProperties(context));
     Mockito.when(cluster.getName())
@@ -408,9 +410,8 @@ public class DataprocProvisionerTest {
     provisioner.doDeleteCluster(context, cluster, conf);
 
     Mockito.verify(dataprocClient)
-        .updateClusterLabels(Mockito.eq("testClusterName"),
-            addedLabelsCaptor.capture(), Mockito.eq(Collections.singleton(
-                AbstractDataprocProvisioner.LABEL_RUN_KEY)));
+        .updateClusterLabels(Mockito.eq("testClusterName"), addedLabelsCaptor.capture(),
+            Mockito.eq(Collections.singleton(AbstractDataprocProvisioner.LABEL_RUN_KEY)));
     Assert.assertEquals(
         Collections.singleton(AbstractDataprocProvisioner.LABEL_REUSE_UNTIL),
         addedLabelsCaptor.getValue()

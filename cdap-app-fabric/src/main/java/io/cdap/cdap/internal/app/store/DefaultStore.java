@@ -940,6 +940,18 @@ public class DefaultStore implements Store {
   }
 
   @Override
+  public ApplicationId getLatestApp(ApplicationReference appRef) throws ApplicationNotFoundException {
+    ApplicationMeta appMeta = getLatest(appRef);
+    if (appMeta == null) {
+      throw new ApplicationNotFoundException(appRef);
+    }
+
+    return new ApplicationId(appRef.getNamespace(),
+        appRef.getApplication(),
+        appMeta.getSpec().getAppVersion());
+  }
+
+  @Override
   public Collection<ApplicationId> getAllAppVersionsAppIds(ApplicationReference appRef) {
     return TransactionRunners.run(transactionRunner, context -> {
       return getAppMetadataStore(context).getAllAppVersionsAppIds(appRef);
@@ -1177,6 +1189,14 @@ public class DefaultStore implements Store {
       verifyApplicationExists(context, namespaceId, appName);
       getAppStateTable(context).deleteAll(namespaceId, appName);
     }, ApplicationNotFoundException.class);
+  }
+
+  @Override
+  public long getApplicationCount(NamespaceId namespaceId) {
+    return TransactionRunners.run(transactionRunner, context -> {
+          return getAppMetadataStore(context).getNamespaceApplicationCount(namespaceId);
+        }
+    );
   }
 
   private AppStateTable getAppStateTable(StructuredTableContext context)

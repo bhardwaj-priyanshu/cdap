@@ -24,12 +24,13 @@ import com.google.inject.Inject;
 import com.google.inject.name.Named;
 import io.cdap.cdap.api.feature.FeatureFlagsProvider;
 import io.cdap.cdap.api.metrics.MetricsCollectionService;
-import io.cdap.cdap.app.runtime.ProgramRuntimeService;
+import io.cdap.cdap.common.auditlogging.AuditLogSetterHook;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.conf.SConfiguration;
 import io.cdap.cdap.common.discovery.ResolvingDiscoverable;
 import io.cdap.cdap.common.discovery.URIScheme;
+import io.cdap.cdap.common.encryption.EncryptionExemptionHook;
 import io.cdap.cdap.common.feature.DefaultFeatureFlagsProvider;
 import io.cdap.cdap.common.http.CommonNettyHttpServiceFactory;
 import io.cdap.cdap.common.logging.LoggingContextAccessor;
@@ -41,17 +42,15 @@ import io.cdap.cdap.internal.app.store.AppMetadataStore;
 import io.cdap.cdap.internal.bootstrap.BootstrapService;
 import io.cdap.cdap.internal.credential.CredentialProviderService;
 import io.cdap.cdap.internal.namespace.credential.NamespaceCredentialProviderService;
-import io.cdap.cdap.internal.operation.OperationNotificationSubscriberService;
 import io.cdap.cdap.internal.provision.ProvisioningService;
-import io.cdap.cdap.internal.sysapp.SystemAppManagementService;
 import io.cdap.cdap.proto.id.NamespaceId;
-import io.cdap.cdap.scheduler.CoreSchedulerService;
 import io.cdap.cdap.sourcecontrol.RepositoryCleanupService;
 import io.cdap.cdap.sourcecontrol.operationrunner.SourceControlOperationRunner;
 import io.cdap.cdap.spi.data.transaction.TransactionRunner;
 import io.cdap.cdap.spi.data.transaction.TransactionRunners;
 import io.cdap.cdap.spi.data.transaction.TxCallable;
 import io.cdap.cdap.store.DefaultNamespaceStore;
+import io.cdap.http.AbstractHandlerHook;
 import io.cdap.http.HttpHandler;
 import io.cdap.http.NettyHttpService;
 import java.net.InetAddress;
@@ -76,93 +75,63 @@ public class AppFabricServer extends AbstractIdleService {
 
   private final DiscoveryService discoveryService;
   private final InetAddress hostname;
-  private final ProgramRuntimeService programRuntimeService;
   private final ApplicationLifecycleService applicationLifecycleService;
   private final Set<String> servicesNames;
   private final Set<String> handlerHookNames;
-  private final ProgramNotificationSubscriberService programNotificationSubscriberService;
-  private final ProgramStopSubscriberService programStopSubscriberService;
-  private final RunRecordCorrectorService runRecordCorrectorService;
-  private final RunDataTimeToLiveService runDataTimeToLiveService;
-  private final ProgramRunStatusMonitorService programRunStatusMonitorService;
-  private final RunRecordMonitorService runRecordCounterService;
-  private final CoreSchedulerService coreSchedulerService;
   private final CredentialProviderService credentialProviderService;
   private final NamespaceCredentialProviderService namespaceCredentialProviderService;
   private final ProvisioningService provisioningService;
   private final BootstrapService bootstrapService;
-  private final SystemAppManagementService systemAppManagementService;
   private final SourceControlOperationRunner sourceControlOperationRunner;
   private final RepositoryCleanupService repositoryCleanupService;
-  private final OperationNotificationSubscriberService operationNotificationSubscriberService;
   private final CConfiguration cConf;
   private final SConfiguration sConf;
   private final boolean sslEnabled;
   private final TransactionRunner transactionRunner;
-
   private Cancellable cancelHttpService;
   private Set<HttpHandler> handlers;
   private MetricsCollectionService metricsCollectionService;
   private CommonNettyHttpServiceFactory commonNettyHttpServiceFactory;
 
   /**
-   * Construct the AppFabricServer with service factory and cConf coming from guice injection.
+   * Construct the AppFabricServer with service factory and cConf coming from guice
+   * injection.
    */
   @Inject
   public AppFabricServer(CConfiguration cConf, SConfiguration sConf,
       DiscoveryService discoveryService,
       @Named(Constants.Service.MASTER_SERVICES_BIND_ADDRESS) InetAddress hostname,
-      @Named(Constants.AppFabric.HANDLERS_BINDING) Set<HttpHandler> handlers,
+      @Named(Constants.AppFabric.SERVER_HANDLERS_BINDING) Set<HttpHandler> handlers,
       @Nullable MetricsCollectionService metricsCollectionService,
-      ProgramRuntimeService programRuntimeService,
-      RunRecordCorrectorService runRecordCorrectorService,
-      ProgramRunStatusMonitorService programRunStatusMonitorService,
       ApplicationLifecycleService applicationLifecycleService,
-      ProgramNotificationSubscriberService programNotificationSubscriberService,
-      ProgramStopSubscriberService programStopSubscriberService,
       @Named("appfabric.services.names") Set<String> servicesNames,
       @Named("appfabric.handler.hooks") Set<String> handlerHookNames,
-      CoreSchedulerService coreSchedulerService,
       CredentialProviderService credentialProviderService,
       NamespaceCredentialProviderService namespaceCredentialProviderService,
       ProvisioningService provisioningService,
       BootstrapService bootstrapService,
-      SystemAppManagementService systemAppManagementService,
       TransactionRunner transactionRunner,
-      RunRecordMonitorService runRecordCounterService,
       CommonNettyHttpServiceFactory commonNettyHttpServiceFactory,
-      RunDataTimeToLiveService runDataTimeToLiveService,
       SourceControlOperationRunner sourceControlOperationRunner,
-      RepositoryCleanupService repositoryCleanupService,
-      OperationNotificationSubscriberService operationNotificationSubscriberService) {
+      RepositoryCleanupService repositoryCleanupService) {
     this.hostname = hostname;
     this.discoveryService = discoveryService;
     this.handlers = handlers;
     this.cConf = cConf;
     this.sConf = sConf;
     this.metricsCollectionService = metricsCollectionService;
-    this.programRuntimeService = programRuntimeService;
     this.servicesNames = servicesNames;
     this.handlerHookNames = handlerHookNames;
     this.applicationLifecycleService = applicationLifecycleService;
-    this.programNotificationSubscriberService = programNotificationSubscriberService;
-    this.programStopSubscriberService = programStopSubscriberService;
-    this.runRecordCorrectorService = runRecordCorrectorService;
-    this.programRunStatusMonitorService = programRunStatusMonitorService;
     this.sslEnabled = cConf.getBoolean(Constants.Security.SSL.INTERNAL_ENABLED);
-    this.coreSchedulerService = coreSchedulerService;
     this.credentialProviderService = credentialProviderService;
     this.namespaceCredentialProviderService = namespaceCredentialProviderService;
     this.provisioningService = provisioningService;
     this.bootstrapService = bootstrapService;
-    this.systemAppManagementService = systemAppManagementService;
     this.transactionRunner = transactionRunner;
-    this.runRecordCounterService = runRecordCounterService;
-    this.runDataTimeToLiveService = runDataTimeToLiveService;
     this.commonNettyHttpServiceFactory = commonNettyHttpServiceFactory;
     this.sourceControlOperationRunner = sourceControlOperationRunner;
     this.repositoryCleanupService = repositoryCleanupService;
-    this.operationNotificationSubscriberService = operationNotificationSubscriberService;
   }
 
   /**
@@ -183,25 +152,29 @@ public class AppFabricServer extends AbstractIdleService {
         provisioningService.start(),
         applicationLifecycleService.start(),
         bootstrapService.start(),
-        programRuntimeService.start(),
-        programNotificationSubscriberService.start(),
-        programStopSubscriberService.start(),
-        runRecordCorrectorService.start(),
-        programRunStatusMonitorService.start(),
-        coreSchedulerService.start(),
         credentialProviderService.start(),
-        runRecordCounterService.start(),
-        runDataTimeToLiveService.start(),
         sourceControlOperationRunner.start(),
-        repositoryCleanupService.start(),
-        operationNotificationSubscriberService.start()
+        repositoryCleanupService.start()
     ));
     Futures.allAsList(futuresList).get();
 
     // Create handler hooks
-    List<MetricsReporterHook> handlerHooks = handlerHookNames.stream()
+    List<AbstractHandlerHook> handlerHooks = handlerHookNames.stream()
         .map(name -> new MetricsReporterHook(cConf, metricsCollectionService, name))
         .collect(Collectors.toList());
+
+    // Create handler hooks
+    List<AuditLogSetterHook> auditHandlerHooks = handlerHookNames.stream()
+      .map(name -> new AuditLogSetterHook(cConf, name))
+      .collect(Collectors.toList());
+
+    // Create encryption exemption handler hooks
+    List<EncryptionExemptionHook> encryptionHandlerHooks = handlerHookNames.stream()
+        .map(name -> new EncryptionExemptionHook())
+        .collect(Collectors.toList());
+
+    handlerHooks.addAll(auditHandlerHooks);
+    handlerHooks.addAll(encryptionHandlerHooks);
 
     // Run http service on random port
     NettyHttpService.Builder httpServiceBuilder = commonNettyHttpServiceFactory
@@ -238,24 +211,14 @@ public class AppFabricServer extends AbstractIdleService {
 
   @Override
   protected void shutDown() throws Exception {
-    coreSchedulerService.stopAndWait();
-    bootstrapService.stopAndWait();
-    systemAppManagementService.stopAndWait();
     cancelHttpService.cancel();
-    programRuntimeService.stopAndWait();
     applicationLifecycleService.stopAndWait();
-    programNotificationSubscriberService.stopAndWait();
-    programStopSubscriberService.stopAndWait();
-    runRecordCorrectorService.stopAndWait();
-    programRunStatusMonitorService.stopAndWait();
+    bootstrapService.stopAndWait();
     provisioningService.stopAndWait();
-    runRecordCounterService.stopAndWait();
-    runDataTimeToLiveService.stopAndWait();
     sourceControlOperationRunner.stopAndWait();
     repositoryCleanupService.stopAndWait();
     credentialProviderService.stopAndWait();
     namespaceCredentialProviderService.stopAndWait();
-    operationNotificationSubscriberService.stopAndWait();
   }
 
   private Cancellable startHttpService(NettyHttpService httpService) throws Exception {

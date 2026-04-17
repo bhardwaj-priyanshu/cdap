@@ -435,7 +435,9 @@ public abstract class DefaultStoreTest {
       .setProperties(noRuntimeArgsProps)
       .setCluster(emptyCluster)
       .setArtifactId(artifactId)
-      .setSourceId(AppFabricTestHelper.createSourceId(sourceId)).build();
+      .setSourceId(AppFabricTestHelper.createSourceId(sourceId))
+      .setFlowControlStatus("")
+      .build();
     RunRecordDetail actualRecord7 = store.getRun(programId.run(run7.getId()));
     Assert.assertEquals(expectedRunRecord7, actualRecord7);
 
@@ -450,7 +452,9 @@ public abstract class DefaultStoreTest {
       .setProperties(noRuntimeArgsProps)
       .setCluster(emptyCluster)
       .setArtifactId(artifactId)
-      .setSourceId(AppFabricTestHelper.createSourceId(sourceId)).build();
+      .setSourceId(AppFabricTestHelper.createSourceId(sourceId))
+      .setFlowControlStatus("")
+      .build();
     RunRecordDetail actualRecord8 = store.getRun(programId.run(run8.getId()));
     Assert.assertEquals(expectedRunRecord8, actualRecord8);
 
@@ -470,7 +474,9 @@ public abstract class DefaultStoreTest {
       .setProperties(noRuntimeArgsProps)
       .setCluster(emptyCluster)
       .setArtifactId(artifactId)
-      .setSourceId(AppFabricTestHelper.createSourceId(sourceId)).build();
+      .setSourceId(AppFabricTestHelper.createSourceId(sourceId))
+      .setFlowControlStatus("")
+      .build();
     RunRecordDetail actualRecord9 = store.getRun(programId.run(run9.getId()));
     Assert.assertEquals(expectedRunRecord9, actualRecord9);
 
@@ -1444,6 +1450,23 @@ public abstract class DefaultStoreTest {
     Assert.assertEquals(creationTimes.get(1) - 1000, (long) creationTimes.get(2));
     Assert.assertEquals(latestVersionCount.get(), 1);
     Assert.assertEquals(latestAppId.get(), actualApps.get(0));
+  }
+
+  @Test
+  public void testGetApplicationCount() throws ConflictException {
+    ApplicationSpecification spec = Specifications.from(new AllProgramsApp());
+    NamespaceId namespaceId = new NamespaceId("custom");
+    ApplicationMeta appMeta = new ApplicationMeta(spec.getName(), spec,
+        new ChangeDetail(null, null, null,
+            System.currentTimeMillis()));
+    for (int i = 0; i < 5; i++) {
+      ApplicationId appId = namespaceId.app("application" + i);
+      store.addLatestApplication(appId, appMeta);
+      Assert.assertNotNull(store.getApplication(appId));
+    }
+    long result = store.getApplicationCount(namespaceId);
+
+    Assert.assertEquals(5, result);
   }
 
   private void writeStartRecord(ProgramRunId run, ArtifactId artifactId) {

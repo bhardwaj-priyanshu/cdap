@@ -26,7 +26,6 @@ import io.cdap.cdap.common.runtime.RuntimeModule;
 import io.cdap.cdap.proto.element.EntityType;
 import io.cdap.cdap.proto.id.EntityId;
 import io.cdap.cdap.proto.security.Permission;
-import io.cdap.cdap.security.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.security.impersonation.SecurityUtil;
 import io.cdap.cdap.security.spi.authorization.AccessEnforcer;
 import io.cdap.cdap.security.spi.authorization.ContextAccessEnforcer;
@@ -52,7 +51,6 @@ public class AuthorizationEnforcementModule extends RuntimeModule {
             .to(NoOpAccessController.class).in(Scopes.SINGLETON);
         bind(ContextAccessEnforcer.class).to(DefaultContextAccessEnforcer.class)
             .in(Scopes.SINGLETON);
-        install(new UserCredentialAeadEncryptionModule());
       }
     };
   }
@@ -68,7 +66,6 @@ public class AuthorizationEnforcementModule extends RuntimeModule {
             .to(NoOpAccessController.class).in(Scopes.SINGLETON);
         bind(ContextAccessEnforcer.class).to(DefaultContextAccessEnforcer.class)
             .in(Scopes.SINGLETON);
-        install(new UserCredentialAeadEncryptionModule());
       }
     };
   }
@@ -122,7 +119,6 @@ public class AuthorizationEnforcementModule extends RuntimeModule {
             .toProvider(InternalAccessEnforcerProvider.class).in(Scopes.SINGLETON);
         bind(ContextAccessEnforcer.class).to(DefaultContextAccessEnforcer.class)
             .in(Scopes.SINGLETON);
-        install(new UserCredentialAeadEncryptionModule());
       }
     };
   }

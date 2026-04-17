@@ -16,27 +16,37 @@
 
 package io.cdap.cdap.storage.spanner;
 
+import com.google.api.client.util.Throwables;
 import com.google.cloud.ByteArray;
+import com.google.cloud.spanner.DatabaseClient;
 import com.google.cloud.spanner.Key;
 import com.google.cloud.spanner.KeyRange;
 import com.google.cloud.spanner.KeySet;
+import com.google.cloud.spanner.ReadContext;
 import com.google.cloud.spanner.ResultSet;
 import com.google.cloud.spanner.Statement;
 import com.google.cloud.spanner.Struct;
+import com.google.cloud.spanner.TimestampBound;
 import com.google.cloud.spanner.TransactionContext;
 import com.google.cloud.spanner.Value;
+import com.google.common.annotations.VisibleForTesting;
 import io.cdap.cdap.api.dataset.lib.AbstractCloseableIterator;
 import io.cdap.cdap.api.dataset.lib.CloseableIterator;
+import io.cdap.cdap.spi.data.FieldSizeLimitExceededException;
 import io.cdap.cdap.spi.data.InvalidFieldException;
 import io.cdap.cdap.spi.data.SortOrder;
 import io.cdap.cdap.spi.data.StructuredRow;
 import io.cdap.cdap.spi.data.StructuredTable;
-import io.cdap.cdap.spi.data.table.StructuredTableSchema;
+import io.cdap.cdap.spi.data.compression.Compressor;
 import io.cdap.cdap.spi.data.table.field.Field;
 import io.cdap.cdap.spi.data.table.field.FieldType;
-import io.cdap.cdap.spi.data.table.field.FieldValidator;
 import io.cdap.cdap.spi.data.table.field.Fields;
 import io.cdap.cdap.spi.data.table.field.Range;
+import io.cdap.cdap.spi.data.table.options.QueryOption;
+import io.cdap.cdap.spi.data.table.options.StaleReadOption;
+import io.cdap.cdap.storage.spanner.compression.CompressionConfig;
+import io.cdap.cdap.storage.spanner.compression.CompressorFactory;
+import io.cdap.cdap.storage.spanner.compression.CompressorType;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -48,6 +58,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
@@ -60,16 +71,29 @@ import org.slf4j.LoggerFactory;
 public class SpannerStructuredTable implements StructuredTable {
 
   private static final Logger LOG = LoggerFactory.getLogger(SpannerStructuredTable.class);
+  /**
+   * Spanner limit for string field in bytes.
+   */
+  private static final int STRING_LIMIT = 2621440;
+  /**
+   * Spanner limit for byte[] field in bytes.
+   */
+  private static final int BYTES_LIMIT = 10 * 1024 * 1024;
 
   private final TransactionContext transactionContext;
-  private final StructuredTableSchema schema;
-  private final FieldValidator fieldValidator;
+  private final SpannerStructuredTableSchema schema;
+  private final SpannerFieldValidator fieldValidator;
+  private final DatabaseClient dbClient;
 
+  /**
+   * Constructor for {@link SpannerStructuredTable}.
+   */
   public SpannerStructuredTable(TransactionContext transactionContext,
-      StructuredTableSchema schema) {
+      SpannerStructuredTableSchema schema, DatabaseClient dbClient) {
     this.transactionContext = transactionContext;
     this.schema = schema;
-    this.fieldValidator = new FieldValidator(schema);
+    this.fieldValidator = new SpannerFieldValidator(schema);
+    this.dbClient = dbClient;
   }
 
   @Override
@@ -110,6 +134,13 @@ public class SpannerStructuredTable implements StructuredTable {
         primaryKeyFields.add(field);
       } else {
         updateFields.add(field);
+        CompressorType compressorType = determineCompressorForField(field);
+        if (compressorType != null) {
+          Field<String> compressedField = Fields.stringField(
+              field.getName() + CompressionConfig.COMPRESSED_COLUMN_SUFFIX,
+              compressorType.name());
+          updateFields.add(compressedField);
+        }
       }
       fieldNames.add(field.getName());
     }
@@ -127,11 +158,16 @@ public class SpannerStructuredTable implements StructuredTable {
 
     LOG.trace("Updating row: {}", sql);
 
-    Statement statement = fields.stream()
-        .reduce(Statement.newBuilder(sql),
-            (builder, field) -> builder.bind(field.getName()).to(getValue(field)),
-            (builder1, builder2) -> builder1)
-        .build();
+    Statement.Builder builder = Statement.newBuilder(sql);
+    // Bind values for updateFields.
+    for (Field<?> field : updateFields) {
+      builder.bind(field.getName()).to(getValue(field));
+    }
+    // Bind values for primaryKeyFields.
+    for (Field<?> field : primaryKeyFields) {
+      builder.bind(field.getName()).to(getValue(field));
+    }
+    Statement statement = builder.build();
 
     transactionContext.executeUpdate(statement);
   }
@@ -224,6 +260,7 @@ public class SpannerStructuredTable implements StructuredTable {
       Collection<Field<?>> filterIndexes)
       throws InvalidFieldException {
     fieldValidator.validateScanRange(keyRange);
+    fieldValidator.validateFilterIndexes(filterIndexes);
     filterIndexes.forEach(fieldValidator::validateField);
     if (!schema.isIndexColumns(
         filterIndexes.stream().map(Field::getName).collect(Collectors.toList()))) {
@@ -442,12 +479,38 @@ public class SpannerStructuredTable implements StructuredTable {
   @Override
   public long count(Collection<Range> keyRanges, Collection<Field<?>> filterIndexes)
       throws InvalidFieldException, IOException {
+    fieldValidator.validateFilterIndexes(filterIndexes);
     try (ResultSet resultSet = transactionContext.executeQuery(
         getCountStatement(keyRanges, filterIndexes))) {
       if (!resultSet.next()) {
         return 0L;
       }
       return resultSet.getCurrentRowAsStruct().getLong(0);
+    }
+  }
+
+  @Override
+  public long count(Collection<Range> keyRanges, Collection<Field<?>> filterIndexes,
+      QueryOption... options) throws InvalidFieldException, IOException {
+    Optional<StaleReadOption> staleOption = QueryOption.getOption(StaleReadOption.class, options);
+    // Fallback to strong read if option is missing OR staleness is not > 0.
+    // A staleness of 0 is effectively a strong read, which requires locks.
+    if (!staleOption.isPresent() || staleOption.get().getMaxStalenessInSeconds() <= 0) {
+      return count(keyRanges, filterIndexes);
+    }
+
+    fieldValidator.validateFilterIndexes(filterIndexes);
+    TimestampBound staleness = TimestampBound.ofMaxStaleness(
+        staleOption.get().getMaxStalenessInSeconds(), TimeUnit.SECONDS);
+    // Use a single-use snapshot to bypass transaction locks.
+    try (ReadContext readContext = dbClient.singleUse(staleness)) {
+      Statement sqlStatement = getCountStatement(keyRanges, filterIndexes);
+      try (ResultSet resultSet = readContext.executeQuery(sqlStatement)) {
+        if (!resultSet.next()) {
+          return 0L;
+        }
+        return resultSet.getCurrentRowAsStruct().getLong(0);
+      }
     }
   }
 
@@ -483,37 +546,80 @@ public class SpannerStructuredTable implements StructuredTable {
     List<String> conditions = new ArrayList<>();
     int paramIndex = parameters.size();
 
-    int beginIndex = 1;
-    int beginFieldsCount = range.getBegin().size();
-    for (Field<?> field : range.getBegin()) {
-      // Edge case for = when we filter by the last field
-      // This is for case like ([KEY: "ns1", KEY2: 123], EXCLUSIVE, [KEY: "ns1", KEY2: 250], INCLUSIVE)
-      // We need to check the ending bound for KEY2, not KEY
-      String symbol =
-          beginIndex == beginFieldsCount && range.getBeginBound().equals(Range.Bound.EXCLUSIVE)
-              ? " > " : " >= ";
-      conditions.add(escapeName(field.getName()) + symbol + "@p_" + paramIndex);
-      parameters.put("p_" + paramIndex, getValue(field));
-      paramIndex++;
-      beginIndex++;
+    if (!range.getBegin().isEmpty()) {
+      conditions.add(getCompositeKeyCondition(new ArrayList<>(range.getBegin()), range.getBeginBound(),
+                                                      true, parameters, paramIndex));
+      paramIndex += range.getBegin().size();
     }
 
-    int endIndex = 1;
-    int endFieldsCount = range.getEnd().size();
-    for (Field<?> field : range.getEnd()) {
-      // Edge case for = when we filter by the last field
-      // This is for case like ([KEY: "ns1", KEY2: 123], INCLUSIVE, [KEY: "ns1", KEY2: 250], EXCLUSIVE)
-      // We need to check the ending bound for KEY2, not KEY
-      String symbol =
-          endIndex == endFieldsCount && range.getEndBound().equals(Range.Bound.EXCLUSIVE) ? " < "
-              : " <= ";
-      conditions.add(escapeName(field.getName()) + symbol + "@p_" + paramIndex);
-      parameters.put("p_" + paramIndex, getValue(field));
-      paramIndex++;
-      endIndex++;
+    if (!range.getEnd().isEmpty()) {
+      conditions.add(getCompositeKeyCondition(new ArrayList<>(range.getEnd()), range.getEndBound(),
+                                                      false, parameters, paramIndex));
     }
 
     return String.join(" AND ", conditions);
+  }
+
+  /**
+   * Builds a SQL fragment for one bound (lower or upper) of a range on a compound key,
+   * handling lexicographical ordering.
+   *
+   * <p>Example: For a lower bound `(Key1, Key2) >= ('A', 10)`, this generates:
+   * `((`Key1` > @p_0) OR (`Key1` = @p_0 AND `Key2` >= @p_1))`.</p>
+   * The parameters map will contain mappings for `p_0` to 'A' and `p_1` to 10.
+   *
+   * @param fields The fields forming the compound key (e.g., namespace, application, version).
+   * @param bound The bound type (INCLUSIVE or EXCLUSIVE).
+   * @param isLowerBound True if building the condition for the beginning of the range (lower bound),
+   *                     false if for the end of the range (upper bound).
+   * @param parameters The map to add Spanner parameters to. Parameter names will be generated
+   *                   starting from the current size of this map.
+   * @return A SQL fragment for the composite range bound.
+   */
+  @VisibleForTesting
+  String getCompositeKeyCondition(List<Field<?>> fields, Range.Bound bound, boolean isLowerBound,
+                                      Map<String, Value> parameters, int startParamIndex) {
+    if (fields.isEmpty()) {
+      return "";
+    }
+
+    List<String> orClauses = new ArrayList<>();
+    StringBuilder equalityPrefix = new StringBuilder();
+
+    for (int i = 0; i < fields.size(); i++) {
+      Field<?> field = fields.get(i);
+      String paramName = "p_" + (startParamIndex + i);
+      parameters.put(paramName, getValue(field));
+
+      // 1. Determine operator: strictly >/< for non-terminal fields,
+      // or based on inclusivity for the final field.
+      boolean isLast = (i == fields.size() - 1);
+      boolean isInclusive = bound == Range.Bound.INCLUSIVE;
+      String op;
+      if (isLowerBound) {
+        op = (isLast && isInclusive) ? " >= " : " > ";
+      } else {
+        op = (isLast && isInclusive) ? " <= " : " < ";
+      }
+
+      // 2. Construct the OR clause for this depth
+      String escapedName = escapeName(field.getName());
+      String condition = escapedName + op + "@" + paramName;
+      if (equalityPrefix.length() > 0) {
+        orClauses.add("(" + equalityPrefix + " AND " + condition + ")");
+      } else {
+        orClauses.add("(" + condition + ")");
+      }
+
+      if (!isLast) {
+        if (equalityPrefix.length() > 0) {
+          equalityPrefix.append(" AND ");
+        }
+        equalityPrefix.append(escapedName).append(" = @").append(paramName);
+      }
+    }
+
+    return "(" + String.join(" OR ", orClauses) + ")";
   }
 
   private String getFieldsWhereClause(Collection<Field<?>> fields, Map<String, Value> parameters) {
@@ -608,6 +714,13 @@ public class SpannerStructuredTable implements StructuredTable {
     for (Field<?> field : fields) {
       fieldValidator.validateField(field);
       insertFields.add(field);
+      CompressorType compressorType = determineCompressorForField(field);
+      if (compressorType != null) {
+        Field<String> compressedField = Fields.stringField(
+            field.getName() + CompressionConfig.COMPRESSED_COLUMN_SUFFIX,
+            compressorType.name());
+        insertFields.add(compressedField);
+      }
     }
 
     String sql = "INSERT INTO " + escapeName(schema.getTableId().getName()) + " ("
@@ -618,13 +731,34 @@ public class SpannerStructuredTable implements StructuredTable {
 
     LOG.trace("Inserting row: {}", sql);
 
-    Statement statement = fields.stream()
+    Statement statement = insertFields.stream()
         .reduce(Statement.newBuilder(sql),
             (builder, field) -> builder.bind(field.getName()).to(getValue(field)),
             (builder1, builder2) -> builder1)
         .build();
 
     transactionContext.executeUpdate(statement);
+  }
+
+  private CompressorType determineCompressorForField(Field field) {
+    Object value = field.getValue();
+    if (value == null) {
+      return null;
+    }
+
+    CompressorType compressor = schema.getCompressorType(field.getName());
+    if (compressor == null) {
+      return null;
+    }
+
+    switch (field.getFieldType()) {
+      case STRING:
+        return ((String) value).length() > STRING_LIMIT ? compressor : null;
+      case BYTES:
+        return ((byte[]) value).length > BYTES_LIMIT ? compressor : null;
+      default:
+        return null;
+    }
   }
 
   private Key createKey(Collection<Field<?>> fields) {
@@ -647,15 +781,56 @@ public class SpannerStructuredTable implements StructuredTable {
       case DOUBLE:
         return Value.float64((Double) value);
       case STRING:
-        return Value.string((String) value);
+        return Value.string(getStringValue(field));
       case BYTES:
-        return Value.bytes(value == null ? null : (ByteArray.copyFrom((byte[]) value)));
+        return Value.bytes(value == null ? null : getBytesValue(field));
       case BOOLEAN:
         return Value.bool((Boolean) value);
     }
 
     // This shouldn't happen
     throw new IllegalArgumentException("Unsupported field type " + field.getFieldType());
+  }
+
+
+  private String getStringValue(Field field) {
+    String val = (String) field.getValue();
+    CompressorType compressorType = determineCompressorForField(field);
+    if (compressorType != null) {
+      Compressor compressor = CompressorFactory.getCompressor(compressorType);
+      try {
+        val = compressor.compress(val);
+      } catch (IOException e) {
+        throw Throwables.propagate(e);
+      }
+    }
+
+    if (val != null && val.length() > STRING_LIMIT) {
+      throw new FieldSizeLimitExceededException(schema.getTableId(), field.getName(), val.length(),
+          STRING_LIMIT);
+    }
+
+    return val;
+  }
+
+  private ByteArray getBytesValue(Field field) {
+    byte[] val = (byte[]) field.getValue();
+    CompressorType compressorType = determineCompressorForField(field);
+    if (compressorType != null) {
+      Compressor compressor = CompressorFactory.getCompressor(compressorType);
+      try {
+        val = compressor.compress(val);
+      } catch (IOException e) {
+        throw Throwables.propagate(e);
+      }
+    }
+
+    if (val != null && val.length > BYTES_LIMIT) {
+      throw new FieldSizeLimitExceededException(schema.getTableId(), field.getName(), val.length,
+          BYTES_LIMIT);
+    }
+
+    return ByteArray.copyFrom(val);
   }
 
   /**
@@ -751,10 +926,10 @@ public class SpannerStructuredTable implements StructuredTable {
    */
   private static final class ResultSetIterator extends AbstractCloseableIterator<StructuredRow> {
 
-    private final StructuredTableSchema schema;
+    private final SpannerStructuredTableSchema schema;
     private final ResultSet resultSet;
 
-    ResultSetIterator(StructuredTableSchema schema, ResultSet resultSet) {
+    ResultSetIterator(SpannerStructuredTableSchema schema, ResultSet resultSet) {
       this.schema = schema;
       this.resultSet = resultSet;
     }

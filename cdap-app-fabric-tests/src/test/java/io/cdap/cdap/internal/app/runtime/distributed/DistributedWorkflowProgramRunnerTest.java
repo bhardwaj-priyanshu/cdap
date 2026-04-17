@@ -20,6 +20,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.inject.AbstractModule;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
+import com.google.inject.name.Names;
 import io.cdap.cdap.api.Resources;
 import io.cdap.cdap.api.app.ApplicationSpecification;
 import io.cdap.cdap.app.DefaultAppConfigurer;
@@ -36,10 +37,13 @@ import io.cdap.cdap.app.runtime.ProgramRunner;
 import io.cdap.cdap.app.runtime.ProgramRunnerFactory;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.AeadCipher;
+import io.cdap.cdap.common.encryption.NoOpAeadCipher;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.KafkaClientModule;
 import io.cdap.cdap.common.guice.LocalLocationModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.guice.ZkClientModule;
 import io.cdap.cdap.common.guice.ZkDiscoveryModule;
@@ -55,7 +59,7 @@ import io.cdap.cdap.internal.app.runtime.BasicArguments;
 import io.cdap.cdap.internal.app.runtime.SimpleProgramOptions;
 import io.cdap.cdap.internal.app.runtime.SystemArguments;
 import io.cdap.cdap.logging.guice.LocalLogAppenderModule;
-import io.cdap.cdap.messaging.guice.MessagingClientModule;
+import io.cdap.cdap.messaging.guice.client.DefaultMessagingClientModule;
 import io.cdap.cdap.metrics.guice.MetricsClientRuntimeModule;
 import io.cdap.cdap.metrics.guice.MetricsStoreModule;
 import io.cdap.cdap.operations.guice.OperationalStatsModule;
@@ -282,22 +286,26 @@ public class DistributedWorkflowProgramRunnerTest {
         new DataSetsModules().getDistributedModules(),
         new MetricsClientRuntimeModule().getDistributedModules(),
         new MetricsStoreModule(),
-        new MessagingClientModule(),
+        new DefaultMessagingClientModule(),
         new AuditModule(),
         CoreSecurityRuntimeModule.getDistributedModule(cConf),
         new AuthenticationContextModules().getNoOpModule(),
         new AuthorizationModule(),
         new AuthorizationEnforcementModule().getMasterModule(),
         new TwillModule(),
-        new AppFabricServiceRuntimeModule(cConf).getDistributedModules(),
+        new AppFabricServiceRuntimeModule(cConf, AppFabricServiceRuntimeModule.ALL_SERVICE_TYPES)
+            .getDistributedModules(),
         new ProgramRunnerRuntimeModule().getDistributedModules(),
         new SecureStoreServerModule(),
         new OperationalStatsModule(),
+        new NoOpAuditLogModule(),
         new AbstractModule() {
           @Override
           protected void configure() {
             // TODO (CDAP-14677): find a better way to inject metadata publisher
             bind(MetadataServiceClient.class).to(DefaultMetadataServiceClient.class);
+            bind(AeadCipher.class).annotatedWith(Names.named("UserCredentialEncryption")).to(
+                  NoOpAeadCipher.class);
           }
         });
 

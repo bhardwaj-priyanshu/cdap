@@ -24,7 +24,10 @@ import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Constants used by different systems are all defined here.
@@ -67,8 +70,13 @@ public final class Constants {
   // Directory path for caching remove location content
   public static final String LOCATION_CACHE_PATH = "location.cache.path";
   public static final String LOCATION_CACHE_EXPIRATION_MS = "location.cache.expiration.ms";
+  public static final String LOCATION_CACHE_FORCE_CLEANUP_MS = "location.cache.force.cleanup.ms";
 
   public static final String CLUSTER_NAME = "cluster.name";
+
+  /* This represents the default value of pageSize during list apps call. */
+  public static final String GET_APPS_DEFAULT_PAGE_SIZE = "app.list.default.page.size";
+
   /* Used by the user to specify what part of a path should be replaced by the current user's name. */
   public static final String USER_NAME_SPECIFIER = "${name}";
 
@@ -117,6 +125,7 @@ public final class Constants {
   public static final class Service {
 
     public static final String APP_FABRIC_HTTP = "appfabric";
+    public static final String APP_FABRIC_PROCESSOR = "appfabric.processor";
     public static final String TRANSACTION = "transaction";
     public static final String TRANSACTION_HTTP = "transaction.http";
     public static final String METRICS = "metrics";
@@ -225,10 +234,17 @@ public final class Constants {
   public static final class AppFabric {
 
     /**
+     * App Fabric Processor.
+     */
+
+    public static final String PROCESSOR_PORT = "appfabric.processor.bind.port";
+    public static final String PROCESSOR_ANNOUNCE_PORT = "appfabric.processor.announce.port";
+
+    /**
      * App Fabric Server.
      */
-    public static final String SERVER_PORT = "app.bind.port";
-    public static final String SERVER_ANNOUNCE_PORT = "app.announce.port";
+    public static final String SERVER_PORT = "appfabric.bind.port";
+    public static final String SERVER_ANNOUNCE_PORT = "appfabric.announce.port";
     public static final String OUTPUT_DIR = "app.output.dir";
     public static final String TEMP_DIR = "app.temp.dir";
     public static final String REST_PORT = "app.rest.port";
@@ -279,10 +295,6 @@ public final class Constants {
     public static final String PROGRAM_TRANSACTION_CONTROL = "app.program.transaction.control";
     public static final String MAX_CONCURRENT_RUNS = "app.max.concurrent.runs";
     public static final String MAX_CONCURRENT_LAUNCHING = "app.max.concurrent.launching";
-    public static final String MONITOR_RECORD_AGE_THRESHOLD_SECONDS =
-        "run.record.monitor.record.age.threshold.seconds";
-    public static final String MONITOR_CLEANUP_INTERVAL_SECONDS =
-        "run.record.monitor.cleanup.interval.seconds";
     public static final String PROGRAM_LAUNCH_THREADS = "app.program.launch.threads";
     public static final String PROGRAM_KILL_THREADS = "app.program.kill.threads";
     public static final String RUN_DATA_CLEANUP_TTL_DAYS = "app.run.records.ttl.days";
@@ -298,7 +310,8 @@ public final class Constants {
     /**
      * Guice named bindings.
      */
-    public static final String HANDLERS_BINDING = "appfabric.http.handler";
+    public static final String SERVER_HANDLERS_BINDING = "appfabric.http.handler";
+    public static final String PROCESSOR_HANDLERS_BINDING = "appfabric.processor.http.handler";
 
     /**
      * Defaults.
@@ -329,7 +342,9 @@ public final class Constants {
      */
     public static final String QUERY_PARAM_LIMIT = "limit";
 
-    public static final String SERVICE_DESCRIPTION = "Service for managing application lifecycle.";
+    public static final String SERVICE_DESCRIPTION = "Service for managing HTTP handlers.";
+
+    public static final String PROCESSOR_DESCRIPTION = "Service for managing application lifecycle.";
 
     /**
      * Configuration setting to set the maximum size of a workflow token in MB.
@@ -461,6 +476,7 @@ public final class Constants {
     public static final String CONTAINER_JVM_OPTS = "preview.runner.container.jvm.opts";
     public static final String GCE_METADATA_HOST_ENV_VAR = "GCE_METADATA_HOST";
     public static final String INTERNAL_ROUTER_ENABLED = "preview.runner.internal.router.enabled";
+    public static final String HTTP_COMPRESS_PAYLOAD = "preview.http.compress.payload";
   }
 
   /**
@@ -538,8 +554,14 @@ public final class Constants {
     public static final String METADATA_SERVICE_END_POINT = "task.worker.metadata.service.endpoint";
     public static final String METRIC_PREFIX = "task.worker.";
     public static final String GCE_METADATA_HOST_ENV_VAR = "GCE_METADATA_HOST";
-  }
 
+    /**
+     * Task worker container probe configurations.
+     * For usage for k8s probes refer : `io.cdap.cdap.k8s.util.ProbeFactory`
+     */
+    public static final String TASK_WORKER_PROBE_ENABLED = "task.worker.probe.enabled";
+    public static final String TASK_WORKER_PROBE_PREFIX = "task.worker.probe.";
+  }
 
   /**
    * System pods.
@@ -627,6 +649,8 @@ public final class Constants {
   public static final class AppMetaStore {
 
     public static final String TABLE = "app.meta";
+    public static final Set<String> APPSPEC_REDUCTION_SUPPORTED_STORAGE_PROVIDERS = new HashSet<>(
+        Collections.singleton(Dataset.DATA_STORAGE_SPANNER));
   }
 
   /**
@@ -719,6 +743,7 @@ public final class Constants {
     public static final String DATA_STORAGE_IMPLEMENTATION = "data.storage.implementation";
     public static final String DATA_STORAGE_NOSQL = "nosql";
     public static final String DATA_STORAGE_SQL = "postgresql";
+    public static final String DATA_STORAGE_SPANNER = "gcp-spanner";
     public static final String DATA_STORAGE_SQL_DRIVER_EXTERNAL = "data.storage.sql.jdbc.driver.external";
     public static final String DATA_STORAGE_SQL_DRIVER_DIRECTORY = "data.storage.sql.jdbc.driver.directory";
     public static final String DATA_STORAGE_SQL_JDBC_DRIVER_NAME = "data.storage.sql.jdbc.driver.name";
@@ -964,7 +989,7 @@ public final class Constants {
         ImmutableMap.of(Constants.Metrics.Tag.NAMESPACE,
             NamespaceId.SYSTEM.getNamespace(),
             Constants.Metrics.Tag.COMPONENT,
-            Constants.Service.METRICS_PROCESSOR);
+            Constants.Service.METRICS);
 
     public static final Map<String, String> TRANSACTION_MANAGER_CONTEXT =
         ImmutableMap.of(Constants.Metrics.Tag.NAMESPACE,
@@ -1094,6 +1119,14 @@ public final class Constants {
 
       // For operations
       public static final String OPERATION_RUN = "operation";
+
+      // For error classification
+      public static final String ERROR_CATEGORY = "ectgry";
+      public static final String ERROR_TYPE = "etpe";
+      public static final String DEPENDENCY = "edep";
+      public static final String ERROR_CODE_TYPE = "ecdtpe";
+      public static final String ERROR_CODE = "ecd";
+      public static final String FROM_PLUGIN = "frmplg";
     }
 
     /**
@@ -1149,6 +1182,7 @@ public final class Constants {
 
       public static final String LAUNCHING_COUNT = "flowcontrol.launching.count";
       public static final String RUNNING_COUNT = "flowcontrol.running.count";
+      public static final String READ_STALENESS_SECONDS = "flowcontrol.read.staleness.seconds";
     }
 
     /**
@@ -1169,6 +1203,8 @@ public final class Constants {
       public static final String APPLICATION_COUNT = "application.count";
       public static final String NAMESPACE_COUNT = "namespace.count";
       public static final String APPLICATION_PLUGIN_COUNT = "application.plugin.count";
+      public static final String FAILED_RUNS_CLASSIFICATION_COUNT =
+          "program.failed.runs.classified.count";
     }
 
     /**
@@ -1381,6 +1417,7 @@ public final class Constants {
 
     public static final String LOG_SAVER_HANDLER = "log.saver.handler";
     public static final String ADDRESS = "log.saver.status.bind.address";
+    public static final String PORT = "log.saver.status.bind.port";
 
     public static final String SERVICE_DESCRIPTION = "Service to collect and store logs.";
 
@@ -1501,6 +1538,12 @@ public final class Constants {
     public static final String LOG_APPENDER_EXT_DIR = "app.program.log.appender.extensions.dir";
     public static final String LOG_APPENDER_PROPERTY_PREFIX = "app.program.log.appender.system.properties.";
 
+    // Log publisher configs.
+    public static final String LOG_PUBLISHER_PROVIDER = "log.publisher.provider";
+    public static final String LOG_PUBLISHER_ENABLED = "log.publisher.enabled";
+    public static final String LOG_PUBLISHER_EXT_DIR = "log.publisher.extensions.dir";
+    public static final String LOG_PUBLISHER_PREFIX = "log.publisher";
+
     // Property key in the logger context to indicate it is performing pipeline validation
     public static final String PIPELINE_VALIDATION = "log.pipeline.validation";
 
@@ -1525,6 +1568,14 @@ public final class Constants {
 
     public static final String EVENT_TYPE_TAG = "MDC:eventType";
     public static final String USER_LOG_TAG_VALUE = "userLog";
+    public static final String TAG_FAILED_STAGE = "failedStage";
+    public static final String TAG_ERROR_CATEGORY = "errorCategory";
+    public static final String TAG_ERROR_REASON = "errorReason";
+    public static final String TAG_ERROR_TYPE = "errorType";
+    public static final String TAG_DEPENDENCY = "dependency";
+    public static final String TAG_ERROR_CODE_TYPE = "errorCodeType";
+    public static final String TAG_ERROR_CODE = "errorCode";
+    public static final String TAG_SUPPORTED_DOC_URL = "supportDocUrl";
   }
 
   /**
@@ -1915,6 +1966,18 @@ public final class Constants {
        */
       public static final String USER_CREDENTIAL_ENCRYPTION_ASSOCIATED_DATA
           = "UserCredentialEncryptionAD";
+
+      /**
+       * Associated data for task worker credential encryption.
+       */
+      public static final String TASK_WORKER_ENCRYPTION_ASSOCIATED_DATA
+          = "TaskWorkerEncryptionAD";
+
+      /**
+       * Associated data for preview runner credential encryption.
+       */
+      public static final String PREVIEW_RUNNER_ENCRYPTION_ASSOCIATED_DATA
+          = "PreviewRunnerEncryptionAD";
     }
 
     /**
@@ -2070,9 +2133,13 @@ public final class Constants {
     public static final String STORAGE_PROVIDER_IMPLEMENTATION = "metadata.storage.implementation";
     public static final String STORAGE_PROVIDER_NOSQL = "nosql";
     public static final String STORAGE_PROVIDER_ELASTICSEARCH = "elastic";
+    public static final String STORAGE_PROVIDER_SPANNER = "gcp-spanner";
 
     public static final String METADATA_WRITER_SUBSCRIBER = "metadata.writer";
     public static final String METADATA_CONSUMER_WRITER_SUBSCRIBER = "metadata.consumer.writer";
+
+    // Metadata configs
+    public static final String METADATA_STORAGE_EXT_DIR = "metadata.storage.extensions.dir";
   }
 
   /**
@@ -2099,6 +2166,7 @@ public final class Constants {
     public static final String EXTENSIONS_DIR = "messaging.service.extensions.dir";
 
     public static final String MESSAGING_SERVICE_NAME = "messaging.service.name";
+    public static final String MESSAGING_SERVICE_ENABLED = "messaging.service.enabled";
     public static final String CACHE_SIZE_MB = "messaging.cache.size.mb";
 
     public static final String HBASE_MAX_SCAN_THREADS = "messaging.hbase.max.scan.threads";
@@ -2151,6 +2219,8 @@ public final class Constants {
 
     // TMS HBase table attribute that indicates the number of prefix bytes used for the row key
     public static final String HBASE_MESSAGING_TABLE_PREFIX_NUM_BYTES = "cdap.messaging.table.prefix.num.bytes";
+
+    public static final String SPANNER_EXTENSION_PROPERTY_PREFIX = "messaging.spanner.properties.";
   }
 
   /**
@@ -2539,5 +2609,26 @@ public final class Constants {
     public static final String ENDTIME_NOTIFICATION_KEY = "operation.notification.endtime";
     public static final String ERROR_NOTIFICATION_KEY = "operation.notification.error";
     public static final String USER_ID_NOTIFICATION_KEY = "userId";
+  }
+
+
+  /**
+   * Constants for Data Plane Audit Logging.
+   */
+  public static final class AuditLogging {
+    public static final String AUDIT_LOG_PUBLISH_INTERVAL_SECONDS = "auditlog.publish.interval.seconds";
+
+    /**
+     * Topic prefix for publishing log events  of audited operations to the messaging system.
+     */
+    public static final String AUDIT_LOG_EVENT_TOPIC = "auditlog.event.topic";
+    public static final String AUDIT_LOG_EVENT_NUM_PARTITIONS = "auditlog.event.topic.num.partitions";
+    public static final String AUDIT_LOG_FETCH_SIZE = "auditlog.messaging.fetch.size";
+    public static final String AUDIT_LOG_POLL_DELAY_MILLIS = "auditlog.messaging.poll.delay.millis";
+    public static final String AUDIT_LOG_CONSUMER_WRITER_SUBSCRIBER = "auditlog.consumer.publisher";
+    public static final String AUDIT_LOG_WRITER_SUBSCRIBER = "auditlog.subscriber";
+
+    public static final String AUDIT_LOG_WRITER_RETRY_PREFIX = "system.auditlog.";
+
   }
 }

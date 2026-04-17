@@ -21,8 +21,12 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.classic.spi.ThrowableProxy;
 import ch.qos.logback.core.AppenderBase;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Strings;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
+import io.cdap.cdap.api.exception.ErrorCodeType;
+import io.cdap.cdap.api.exception.FailureDetailsProvider;
+import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.logging.LoggingContext;
 import io.cdap.cdap.common.logging.LoggingContextAccessor;
 import io.cdap.cdap.error.api.ErrorTagProvider;
@@ -117,6 +121,45 @@ public abstract class LogAppender extends AppenderBase<ILoggingEvent> {
     }
   }
 
+  private void addErrorClassificationTags(ILoggingEvent event, Map<String, String> modifiableMdc) {
+    if (event.getThrowableProxy() == null
+        || !(event.getThrowableProxy() instanceof ThrowableProxy)) {
+      return;
+    }
+    Throwable throwable = ((ThrowableProxy) (event.getThrowableProxy())).getThrowable();
+    while (throwable != null) {
+
+      if (throwable instanceof FailureDetailsProvider) {
+        FailureDetailsProvider provider = (FailureDetailsProvider) throwable;
+        boolean stageKeyAbsent = !modifiableMdc.containsKey(Constants.Logging.TAG_FAILED_STAGE);
+        if (stageKeyAbsent && provider.getFailureStage() != null) {
+          modifiableMdc.put(Constants.Logging.TAG_FAILED_STAGE, provider.getFailureStage());
+        }
+        modifiableMdc.put(Constants.Logging.TAG_ERROR_CATEGORY,
+            provider.getErrorCategory().getErrorCategory());
+        if (provider.getErrorReason() != null) {
+          modifiableMdc.put(Constants.Logging.TAG_ERROR_REASON, provider.getErrorReason());
+        }
+        modifiableMdc.put(Constants.Logging.TAG_ERROR_TYPE, provider.getErrorType().name());
+        modifiableMdc.put(Constants.Logging.TAG_DEPENDENCY, String.valueOf(
+            provider.isDependency()));
+        ErrorCodeType errorCodeType = provider.getErrorCodeType();
+        String errorCode = provider.getErrorCode();
+        String supportedDocUrl = provider.getSupportedDocumentationUrl();
+        if (errorCodeType != null) {
+          modifiableMdc.put(Constants.Logging.TAG_ERROR_CODE_TYPE, errorCodeType.name());
+        }
+        if (!Strings.isNullOrEmpty(errorCode)) {
+          modifiableMdc.put(Constants.Logging.TAG_ERROR_CODE, errorCode);
+        }
+        if (!Strings.isNullOrEmpty(supportedDocUrl)) {
+          modifiableMdc.put(Constants.Logging.TAG_SUPPORTED_DOC_URL, supportedDocUrl);
+        }
+      }
+      throwable = throwable.getCause();
+    }
+  }
+
   /**
    * Adds extra MDC tags to the given event.
    */
@@ -124,6 +167,7 @@ public abstract class LogAppender extends AppenderBase<ILoggingEvent> {
       Map<String, String> modifiableMDC) {
 
     addErrorCodeTags(event, modifiableMDC);
+    addErrorClassificationTags(event, modifiableMDC);
 
     // For error logs, if the logging context is in application scope, tag it as program logs.
     if (loggingContext.getSystemTagsMap().containsKey(ApplicationLoggingContext.TAG_APPLICATION_ID)

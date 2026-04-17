@@ -29,15 +29,22 @@ import io.cdap.cdap.proto.security.Permission;
 import io.cdap.cdap.proto.security.PermissionAdapterFactory;
 import io.cdap.cdap.proto.security.Principal;
 import io.cdap.cdap.proto.security.VisibilityRequest;
+import io.cdap.cdap.security.spi.authentication.SecurityRequestContext;
 import io.cdap.cdap.security.spi.authorization.AccessEnforcer;
+import io.cdap.cdap.security.spi.authorization.AuditLogContext;
+import io.cdap.cdap.security.spi.authorization.AuthorizationResponse;
 import io.cdap.cdap.security.spi.authorization.PermissionManager;
+import io.cdap.cdap.security.spi.authorization.UnauthorizedException;
 import io.cdap.http.HttpResponder;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import java.lang.reflect.Type;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
+import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
+import java.util.stream.Collectors;
 import javax.inject.Inject;
 import javax.ws.rs.POST;
 import javax.ws.rs.Path;
@@ -57,6 +64,7 @@ public class RemotePrivilegesHandler extends AbstractRemoteSystemOpsHandler {
   private static final Gson GSON = new GsonBuilder()
       .registerTypeAdapter(EntityId.class, new EntityIdTypeAdapter())
       .registerTypeAdapterFactory(new PermissionAdapterFactory())
+      .enableComplexMapKeySerialization()
       .create();
 
   private final PermissionManager permissionManager;
@@ -74,25 +82,37 @@ public class RemotePrivilegesHandler extends AbstractRemoteSystemOpsHandler {
     AuthorizationPrivilege authorizationPrivilege = GSON.fromJson(
         request.content().toString(StandardCharsets.UTF_8),
         AuthorizationPrivilege.class);
-    LOG.debug("Enforcing for {}", authorizationPrivilege);
+    LOG.trace("Enforcing for {}", authorizationPrivilege);
     Set<Permission> permissions = authorizationPrivilege.getPermissions();
-    if (authorizationPrivilege.getChildEntityType() != null) {
-      //It's expected that we'll always have one, but let's handle generic case
-      for (Permission permission : permissions) {
-        accessEnforcer.enforceOnParent(authorizationPrivilege.getChildEntityType(),
-            authorizationPrivilege.getEntity(),
-            authorizationPrivilege.getPrincipal(), permission);
+    HttpResponseStatus responseStatus = HttpResponseStatus.OK;
+    try {
+      if (authorizationPrivilege.getChildEntityType() != null) {
+        //It's expected that we'll always have one, but let's handle generic case
+        for (Permission permission : permissions) {
+          accessEnforcer.enforceOnParent(authorizationPrivilege.getChildEntityType(),
+              authorizationPrivilege.getEntity(),
+              authorizationPrivilege.getPrincipal(), permission);
+        }
+      } else {
+        accessEnforcer.enforce(authorizationPrivilege.getEntity(),
+            authorizationPrivilege.getPrincipal(),
+            permissions);
       }
-    } else {
-      accessEnforcer.enforce(authorizationPrivilege.getEntity(),
-          authorizationPrivilege.getPrincipal(),
-          permissions);
+    } catch (UnauthorizedException e) {
+      // In case of UnauthorizedException, we have the audit logs. So, propagating them with proper response instead of
+      // throwing it here as we will loose the audit logs. The caller should handle the logs and throw as needed.
+      responseStatus = HttpResponseStatus.valueOf(e.getStatusCode());
     }
-    responder.sendStatus(HttpResponseStatus.OK);
+    Queue<AuditLogContext>  auditLogContextQueue = SecurityRequestContext.getAuditLogQueue();
+    //Clearing this so it doesn't get double write to messaging queue
+    //This should be written by the Client who is calling this service.
+    SecurityRequestContext.clearAuditLogQueue();
+    responder.sendJson(responseStatus, GSON.toJson(auditLogContextQueue));
   }
 
   @POST
   @Path("/isVisible")
+  @SuppressWarnings("unchecked")
   public void isVisible(FullHttpRequest request, HttpResponder responder) throws Exception {
     VisibilityRequest visibilityRequest = GSON.fromJson(
         request.content().toString(StandardCharsets.UTF_8),
@@ -100,9 +120,25 @@ public class RemotePrivilegesHandler extends AbstractRemoteSystemOpsHandler {
     Principal principal = visibilityRequest.getPrincipal();
     Set<EntityId> entityIds = visibilityRequest.getEntityIds();
     LOG.trace("Checking visibility for principal {} on entities {}", principal, entityIds);
-    Set<? extends EntityId> visiableEntities = accessEnforcer.isVisible(entityIds, principal);
-    LOG.trace("Returning entities visible for principal {} as {}", principal, visiableEntities);
-    responder.sendJson(HttpResponseStatus.OK, GSON.toJson(visiableEntities));
+    Set<? extends EntityId> visibleEntities = accessEnforcer.isVisible(entityIds, principal);
+    Map<? extends EntityId, AuthorizationResponse> entityToAuthResponseMap =
+      SecurityRequestContext.getEntityToAuthResponseMap();
+    SecurityRequestContext.clearEntityToAuthResponseMap();
+
+    //For internal checks, no audit log required, so it is possible that map from SecurityRequestContext will be empty
+    // Or might contain less no of visible entities.
+    Map<? extends EntityId, AuthorizationResponse> entityToAuthResponseMapFull = entityToAuthResponseMap;
+    if (visibleEntities.size() > entityToAuthResponseMap.size()) {
+      entityToAuthResponseMapFull = visibleEntities.stream()
+        .collect(Collectors.toMap(
+          key -> key,          // Key is the entityId
+          key -> entityToAuthResponseMap.getOrDefault(key, AuthorizationResponse.Builder.defaultNotRequired())
+        ));
+    }
+
+    LOG.trace("Returning a Map of entities to AuthorizationResponse for the principal {} as {}", principal,
+              entityToAuthResponseMap);
+    responder.sendJson(HttpResponseStatus.OK, GSON.toJson(entityToAuthResponseMapFull));
   }
 
   @POST

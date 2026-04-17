@@ -28,11 +28,13 @@ import com.google.inject.Scopes;
 import com.google.inject.name.Named;
 import com.google.inject.util.Modules;
 import io.cdap.cdap.api.security.store.SecureStore;
+import io.cdap.cdap.app.guice.AuditLogWriterModule;
 import io.cdap.cdap.app.guice.ProgramRunnerRuntimeModule;
 import io.cdap.cdap.common.NotFoundException;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.conf.SConfiguration;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
@@ -165,6 +167,12 @@ public class DefaultPreviewRunnerManager extends AbstractIdleService implements
     newRunnerService.startAndWait();
   }
 
+  @Override
+  public void stop(byte[] pollerInfo) throws Exception {
+    // This is a no-op in a non-distributed environment because there is no separate
+    // runner container to terminate. The preview runner is a thread in the same process.
+  }
+
   /**
    * Create injector for the given application id.
    */
@@ -175,6 +183,8 @@ public class DefaultPreviewRunnerManager extends AbstractIdleService implements
         new IOModule(),
         RemoteAuthenticatorModules.getDefaultModule(),
         new CoreSecurityRuntimeModule().getInMemoryModules(),
+        new AuditLogWriterModule(previewCConf).getInMemoryModules(),
+        new UserCredentialAeadEncryptionModule(),
         new AuthenticationContextModules().getMasterWorkerModule(),
         new PreviewSecureStoreModule(secureStore),
         new PreviewDiscoveryRuntimeModule(discoveryServiceClient),

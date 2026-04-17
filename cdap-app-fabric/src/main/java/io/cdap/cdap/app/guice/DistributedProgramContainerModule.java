@@ -22,16 +22,21 @@ import com.google.inject.Module;
 import com.google.inject.PrivateModule;
 import com.google.inject.Provider;
 import com.google.inject.Scopes;
+import com.google.inject.name.Names;
 import com.google.inject.util.Modules;
 import io.cdap.cdap.app.runtime.Arguments;
 import io.cdap.cdap.app.runtime.ProgramOptions;
 import io.cdap.cdap.app.runtime.ProgramStateWriter;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
+import io.cdap.cdap.common.encryption.AeadCipher;
+import io.cdap.cdap.common.encryption.NoOpAeadCipher;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.DFSLocationModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.KafkaClientModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.SupplierProviderBridge;
 import io.cdap.cdap.common.guice.ZkClientModule;
 import io.cdap.cdap.common.guice.ZkDiscoveryModule;
@@ -63,12 +68,15 @@ import io.cdap.cdap.logging.guice.RemoteLogAppenderModule;
 import io.cdap.cdap.logging.guice.TMSLogAppenderModule;
 import io.cdap.cdap.master.environment.MasterEnvironments;
 import io.cdap.cdap.master.spi.environment.MasterEnvironment;
-import io.cdap.cdap.messaging.client.ClientMessagingService;
+import io.cdap.cdap.messaging.client.DefaultClientMessagingService;
 import io.cdap.cdap.messaging.guice.MessagingServiceModule;
+import io.cdap.cdap.messaging.guice.client.DefaultMessagingClientModule;
 import io.cdap.cdap.metadata.MetadataReaderWriterModules;
 import io.cdap.cdap.metadata.PreferencesFetcher;
 import io.cdap.cdap.metadata.RemotePreferencesFetcherInternal;
 import io.cdap.cdap.metrics.guice.MetricsClientRuntimeModule;
+import io.cdap.cdap.proto.ProgramType;
+import io.cdap.cdap.proto.id.NamespaceId;
 import io.cdap.cdap.proto.id.ProgramId;
 import io.cdap.cdap.proto.id.ProgramRunId;
 import io.cdap.cdap.runtime.spi.RuntimeMonitorType;
@@ -133,7 +141,6 @@ public class DistributedProgramContainerModule extends AbstractModule {
   @Override
   protected void configure() {
     List<Module> modules = getCoreModules();
-
     RuntimeMonitorType runtimeMonitorType = SystemArguments.getRuntimeMonitorType(cConf,
         programOpts);
     modules.add(RuntimeMonitors.getRemoteAuthenticatorModule(runtimeMonitorType, programOpts));
@@ -163,7 +170,6 @@ public class DistributedProgramContainerModule extends AbstractModule {
     modules.add(new IOModule());
     modules.add(new DFSLocationModule());
     modules.add(new MetricsClientRuntimeModule().getDistributedModules());
-    modules.add(new MessagingServiceModule(cConf));
     modules.add(new AuditModule());
     modules.add(new AuthorizationEnforcementModule().getDistributedModules());
     modules.add(new SecureStoreClientModule());
@@ -197,6 +203,7 @@ public class DistributedProgramContainerModule extends AbstractModule {
     });
 
     addDataFabricModules(modules);
+    addServiceProgramModules(modules);
 
     switch (clusterMode) {
       case ON_PREMISE:
@@ -303,6 +310,30 @@ public class DistributedProgramContainerModule extends AbstractModule {
   }
 
   /**
+   * Returned distributed modules if program is of SERVICE in SYSTEM namespace
+   * else return NoOp Modules
+   */
+  private void addServiceProgramModules(List<Module> modules) {
+    if (programRunId.getNamespaceId().equals(NamespaceId.SYSTEM)
+        && programRunId.getType().equals(ProgramType.SERVICE)) {
+      modules.add(new AuditLogWriterModule(cConf).getDistributedModules());
+      modules.add(new MessagingServiceModule(cConf));
+      modules.add(new UserCredentialAeadEncryptionModule());
+    } else {
+      modules.add(new NoOpAuditLogModule());
+      modules.add(new DefaultMessagingClientModule());
+      modules.add(new AbstractModule() {
+        @Override
+        protected void configure() {
+          bind(AeadCipher.class)
+              .annotatedWith(Names.named(UserCredentialAeadEncryptionModule.USER_CREDENTIAL_ENCRYPTION))
+              .to(NoOpAeadCipher.class);
+        }
+      });
+    }
+  }
+
+  /**
    * A Guice module to provide {@link ProgramStateWriter} binding. In normal same cluster / remote
    * cluster execution, it just publishes program states to TMS based on the discovery service. For
    * tethered execution, it publishes program states to the TMS running in the current master
@@ -361,7 +392,7 @@ public class DistributedProgramContainerModule extends AbstractModule {
           internalAuthenticator);
 
       return new MessagingProgramStatePublisher(cConf,
-          new ClientMessagingService(cConf, remoteClientFactory));
+          new DefaultClientMessagingService(cConf, remoteClientFactory));
     }
   }
 }

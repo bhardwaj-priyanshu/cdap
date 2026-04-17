@@ -33,6 +33,7 @@ import com.google.common.cache.LoadingCache;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.google.common.util.concurrent.Uninterruptibles;
+import io.cdap.cdap.spi.data.InvalidFieldException;
 import io.cdap.cdap.spi.data.StructuredTableAdmin;
 import io.cdap.cdap.spi.data.TableAlreadyExistsException;
 import io.cdap.cdap.spi.data.TableDuplicateUpdateException;
@@ -42,11 +43,16 @@ import io.cdap.cdap.spi.data.table.StructuredTableId;
 import io.cdap.cdap.spi.data.table.StructuredTableSchema;
 import io.cdap.cdap.spi.data.table.StructuredTableSpecification;
 import io.cdap.cdap.spi.data.table.field.FieldType;
+import io.cdap.cdap.spi.data.table.field.FieldType.Type;
+import io.cdap.cdap.storage.spanner.compression.CompressionConfig;
+import io.cdap.cdap.storage.spanner.compression.DatabaseCompressionConfig;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
@@ -64,7 +70,8 @@ public class SpannerStructuredTableAdmin implements StructuredTableAdmin {
   private final DatabaseId databaseId;
   private final DatabaseAdminClient adminClient;
   private final DatabaseClient databaseClient;
-  private final LoadingCache<StructuredTableId, StructuredTableSchema> schemaCache;
+  private final DatabaseCompressionConfig databaseCompressionConfig;
+  private final LoadingCache<StructuredTableId, SpannerStructuredTableSchema> schemaCache;
 
   static String getIndexName(StructuredTableId tableId, String column) {
     return String.format("%s_%s_idx", tableId.getName(), column);
@@ -73,17 +80,19 @@ public class SpannerStructuredTableAdmin implements StructuredTableAdmin {
   /**
    * Constructor for {@code SpannerStructuredTableAdmin}.
    *
-   * @param spanner the gcp Spanner service.
+   * @param spanner    the gcp Spanner service.
    * @param databaseId the ID of the Spanner instance database.
    */
-  public SpannerStructuredTableAdmin(Spanner spanner, DatabaseId databaseId) {
+  public SpannerStructuredTableAdmin(Spanner spanner, DatabaseId databaseId,
+      String databaseCompressionConfig) {
     this.databaseId = databaseId;
     this.adminClient = spanner.getDatabaseAdminClient();
     this.databaseClient = spanner.getDatabaseClient(databaseId);
+    this.databaseCompressionConfig = DatabaseCompressionConfig.parse(databaseCompressionConfig);
     this.schemaCache = CacheBuilder.newBuilder()
-        .build(new CacheLoader<StructuredTableId, StructuredTableSchema>() {
+        .build(new CacheLoader<StructuredTableId, SpannerStructuredTableSchema>() {
           @Override
-          public StructuredTableSchema load(StructuredTableId tableId) {
+          public SpannerStructuredTableSchema load(StructuredTableId tableId) {
             return loadSchema(tableId);
           }
         });
@@ -109,6 +118,31 @@ public class SpannerStructuredTableAdmin implements StructuredTableAdmin {
   }
 
   @Override
+  public void createOrUpdate(List<StructuredTableSpecification> specs)
+      throws IOException, TableSchemaIncompatibleException {
+    List<String> createDDLStatements = new ArrayList<>();
+    for (StructuredTableSpecification spec : specs) {
+      if (exists(spec.getTableId())) {
+        tryUpdatingTable(spec);
+      } else {
+        createDDLStatements.addAll(getCreateTableStatements(spec));
+      }
+    }
+    executeDdlStatements(createDDLStatements);
+  }
+
+  private List<String> getCreateTableStatements(StructuredTableSpecification spec) {
+    List<String> statements = new ArrayList<>();
+    StructuredTableSchema schema = createValidatedSchema(spec);
+
+    statements.add(getCreateTableStatement(schema));
+    spec.getIndexes()
+        .forEach(idxColumn -> statements.add(getCreateIndexStatement(idxColumn, schema)));
+
+    return statements;
+  }
+
+  @Override
   public boolean exists(StructuredTableId tableId) {
     try {
       getSchema(tableId);
@@ -120,6 +154,13 @@ public class SpannerStructuredTableAdmin implements StructuredTableAdmin {
 
   @Override
   public StructuredTableSchema getSchema(StructuredTableId tableId) throws TableNotFoundException {
+    return getSpannerStructuredTableSchema(tableId);
+  }
+
+  /**
+   * Returns SpannerStructuredSchema for given tableId.
+   */
+  SpannerStructuredTableSchema getSpannerStructuredTableSchema(StructuredTableId tableId) {
     try {
       return schemaCache.get(tableId);
     } catch (ExecutionException | UncheckedExecutionException e) {
@@ -134,7 +175,7 @@ public class SpannerStructuredTableAdmin implements StructuredTableAdmin {
       throws IOException, TableNotFoundException, TableSchemaIncompatibleException {
     StructuredTableId tableId = spec.getTableId();
     StructuredTableSchema cachedTableSchema = getSchema(tableId);
-    StructuredTableSchema newTableSchema = convertSpecToCompatibleSchema(spec);
+    StructuredTableSchema newTableSchema = createValidatedSchema(spec);
 
     if (newTableSchema.equals(cachedTableSchema)) {
       LOG.trace("The table schema is already up to date: {}", tableId);
@@ -172,8 +213,84 @@ public class SpannerStructuredTableAdmin implements StructuredTableAdmin {
     }
   }
 
+
+  /**
+   * Converts a {@link StructuredTableSpecification} to a {@link SpannerStructuredTableSchema}.
+   * <p>
+   * This method processes the provided table specification to generate a corresponding Spanner
+   * schema. It includes the following steps:
+   * </p>
+   * <ol>
+   *   <li>Converts each field in the specification to a Spanner {@link FieldType}.</li>
+   *   <li>Retrieves the compression configurations associated with the table.</li>
+   *   <li>Validates and adds compressed fields to the schema if applicable.</li>
+   * </ol>
+   *
+   * @param spec the {@link StructuredTableSpecification} to be converted
+   * @return a {@link SpannerStructuredTableSchema} representing the converted schema
+   * @throws IllegalArgumentException if an error occurs during the conversion process, such as:
+   *                                  <ul>
+   *                                    <li>Attempting to compress a primary key field / index field.</li>
+   *                                    <li>Issues retrieving or processing compression configurations.</li>
+   *                                  </ul>
+   */
+  private SpannerStructuredTableSchema createValidatedSchema(StructuredTableSpecification spec) {
+    List<FieldType> convertedFieldTypes = new ArrayList<>();
+    Set<String> fieldNames = new HashSet<>();
+
+    // Convert each field in the specification to a Spanner FieldType
+    for (FieldType field : spec.getFieldTypes()) {
+      String spannerType = getSpannerType(field.getType());
+      FieldType.Type convertedType = fromSpannerType(spannerType);
+
+      convertedFieldTypes.add(new FieldType(field.getName(), convertedType));
+      fieldNames.add(field.getName());
+    }
+
+    // Retrieve compression configurations for the table.
+    Map<String, CompressionConfig> tableCompressionConfig = databaseCompressionConfig.get(
+        spec.getTableId().getName());
+
+    // Add compressed fields to field types if applicable.
+    if (tableCompressionConfig != null) {
+      addCompressedFields(spec, fieldNames, convertedFieldTypes, tableCompressionConfig);
+    }
+
+    return new SpannerStructuredTableSchema(spec.getTableId(), convertedFieldTypes,
+        spec.getPrimaryKeys(), spec.getIndexes(), tableCompressionConfig);
+  }
+
+  private void addCompressedFields(StructuredTableSpecification spec, Set<String> fieldNames,
+      List<FieldType> fieldTypes,
+      Map<String, CompressionConfig> tableCompressionConfig) {
+    Set<String> primaryKeys = new HashSet<>(spec.getPrimaryKeys());
+    Set<String> indexes = new HashSet<>(spec.getIndexes());
+
+    for (Map.Entry<String, CompressionConfig> entry : tableCompressionConfig.entrySet()) {
+      String fieldName = entry.getKey();
+      String compressedFieldName = fieldName + CompressionConfig.COMPRESSED_COLUMN_SUFFIX;
+
+      if (fieldNames.contains(fieldName) && !fieldNames.contains(compressedFieldName)) {
+        // Disallow having primary keys compressed as there is a slight chance of collision
+        // between compressed and uncompressed value.
+        if (primaryKeys.contains(fieldName)) {
+          throw new InvalidFieldException(spec.getTableId(), fieldName,
+              "Invalid attempt to compress primary key");
+        }
+        // Disallow having indexes on compressed columns.
+        if (indexes.contains(fieldName)) {
+          throw new InvalidFieldException(spec.getTableId(), fieldName,
+              "Invalid attempt to compress indexed column");
+        }
+
+        fieldTypes.add(new FieldType(compressedFieldName, Type.STRING));
+      }
+    }
+  }
+
   @VisibleForTesting
   static StructuredTableSchema convertSpecToCompatibleSchema(StructuredTableSpecification spec) {
+    // TODO: [CDAP-21101] Update unit tests to use non static method.
     List<FieldType> convertedFieldTypes =
         spec.getFieldTypes().stream()
             .map(
@@ -222,7 +339,7 @@ public class SpannerStructuredTableAdmin implements StructuredTableAdmin {
     return databaseClient;
   }
 
-  private StructuredTableSchema loadSchema(StructuredTableId tableId)
+  private SpannerStructuredTableSchema loadSchema(StructuredTableId tableId)
       throws TableNotFoundException {
     // Query the information_schema to reconstruct the StructuredTableSchema
     // See https://cloud.google.com/spanner/docs/information-schema for details
@@ -268,22 +385,22 @@ public class SpannerStructuredTableAdmin implements StructuredTableAdmin {
     // Primary Key fields can still be overly added when it's part of other index, exclude them
     Set<String> nonPrimaryKeyIndexes = Sets.difference(indexes, new HashSet<>(primaryKeys));
 
-    return new StructuredTableSchema(tableId, fields, primaryKeys, nonPrimaryKeyIndexes);
+    return new SpannerStructuredTableSchema(tableId, fields, primaryKeys, nonPrimaryKeyIndexes,
+        databaseCompressionConfig.get(tableId.getName()));
   }
 
-  private String getCreateTableStatement(StructuredTableSpecification spec) {
-    Set<String> primaryKeys = spec.getPrimaryKeys().stream()
+  private String getCreateTableStatement(StructuredTableSchema schema) {
+    Set<String> primaryKeys = schema.getPrimaryKeys().stream()
         .map(this::escapeName)
         .collect(Collectors.toCollection(LinkedHashSet::new));
 
-    String statement = spec.getFieldTypes().stream()
-        .map(f -> {
-          String fieldName = f.getName();
+    String statement = schema.getFieldNames().stream()
+        .map(fieldName -> {
           return escapeName(fieldName) + " "
-              + getSpannerType(f.getType())
+              + getSpannerType(Objects.requireNonNull(schema.getType(fieldName)))
               + (primaryKeys.contains(fieldName) ? " NOT NULL" : "");
         }).collect(Collectors.joining(", ",
-            "CREATE TABLE " + escapeName(spec.getTableId().getName()) + " (", ")"));
+            "CREATE TABLE " + escapeName(schema.getTableId().getName()) + " (", ")"));
 
     if (primaryKeys.isEmpty()) {
       return statement;
@@ -350,24 +467,31 @@ public class SpannerStructuredTableAdmin implements StructuredTableAdmin {
   }
 
   private void createTable(StructuredTableSpecification spec) throws IOException {
-    List<String> statements = new ArrayList<>();
-    statements.add(getCreateTableStatement(spec));
+    List<String> ddlStatements = new ArrayList<>();
+    StructuredTableSchema schema = createValidatedSchema(spec);
 
-    StructuredTableSchema schema = new StructuredTableSchema(spec);
+    ddlStatements.add(getCreateTableStatement(schema));
     spec.getIndexes()
-        .forEach(idxColumn -> statements.add(getCreateIndexStatement(idxColumn, schema)));
+        .forEach(idxColumn -> ddlStatements.add(getCreateIndexStatement(idxColumn, schema)));
+    executeDdlStatements(ddlStatements);
+  }
 
+  private void executeDdlStatements(List<String> ddlStatements) throws IOException {
+    if (ddlStatements.isEmpty()) {
+      LOG.debug("No ddl statements to execute");
+      return;
+    }
     try {
       Uninterruptibles.getUninterruptibly(
           adminClient.updateDatabaseDdl(databaseId.getInstanceId().getInstance(),
-              databaseId.getDatabase(), statements, null));
+              databaseId.getDatabase(), ddlStatements, null));
     } catch (ExecutionException e) {
       Throwable cause = e.getCause();
       if (cause instanceof SpannerException
           && ((SpannerException) cause).getErrorCode() == ErrorCode.FAILED_PRECONDITION) {
-        LOG.debug("Concurrent table creation error: ", e);
+        LOG.debug("Concurrent statement execution error: ", e);
       } else {
-        throw new IOException("Failed to create table in Spanner", cause);
+        throw new IOException(e);
       }
     }
   }

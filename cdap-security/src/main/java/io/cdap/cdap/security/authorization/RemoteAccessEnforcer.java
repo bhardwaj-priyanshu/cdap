@@ -46,6 +46,9 @@ import io.cdap.cdap.proto.security.Permission;
 import io.cdap.cdap.proto.security.PermissionAdapterFactory;
 import io.cdap.cdap.proto.security.Principal;
 import io.cdap.cdap.proto.security.VisibilityRequest;
+import io.cdap.cdap.security.spi.authentication.SecurityRequestContext;
+import io.cdap.cdap.security.spi.authorization.AuditLogContext;
+import io.cdap.cdap.security.spi.authorization.AuthorizationResponse;
 import io.cdap.cdap.security.spi.authorization.UnauthorizedException;
 import io.cdap.common.http.HttpMethod;
 import io.cdap.common.http.HttpRequest;
@@ -55,10 +58,15 @@ import java.lang.reflect.Type;
 import java.net.HttpURLConnection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import javax.annotation.ParametersAreNonnullByDefault;
 import org.slf4j.Logger;
@@ -75,8 +83,12 @@ public class RemoteAccessEnforcer extends AbstractAccessEnforcer {
   private static final Gson GSON = new GsonBuilder()
       .registerTypeAdapter(EntityId.class, new EntityIdTypeAdapter())
       .registerTypeAdapterFactory(new PermissionAdapterFactory())
+      .enableComplexMapKeySerialization()
       .create();
-  private static final Type SET_ENTITY_TYPE = new TypeToken<Set<EntityId>>() {
+
+  private static final Type AUDIT_LOG_QUEUE_TYPE = new TypeToken<LinkedBlockingDeque<AuditLogContext>>(){}.getType();
+
+  private static final Type MAP_ENTITY_TYPE = new TypeToken<Map<EntityId, AuthorizationResponse>>() {
   }.getType();
 
   private static final Function<VisibilityKey, EntityId> VISIBILITY_KEY_ENTITY_ID_FUNCTION =
@@ -87,11 +99,11 @@ public class RemoteAccessEnforcer extends AbstractAccessEnforcer {
         }
       };
 
-  private static final Predicate<Map.Entry<VisibilityKey, Boolean>> VISIBILITY_KEYS_FILTER =
-      new Predicate<Map.Entry<VisibilityKey, Boolean>>() {
+  private static final Predicate<Map.Entry<VisibilityKey, VisibilityValue>> VISIBILITY_KEYS_IS_VISIBLE_FILTER =
+      new Predicate<Map.Entry<VisibilityKey, VisibilityValue>>() {
         @Override
-        public boolean apply(Map.Entry<VisibilityKey, Boolean> input) {
-          return input.getValue();
+        public boolean apply(Map.Entry<VisibilityKey, VisibilityValue> input) {
+          return input.getValue().isVisible();
         }
       };
 
@@ -102,9 +114,12 @@ public class RemoteAccessEnforcer extends AbstractAccessEnforcer {
 
     private boolean success;
     private Exception exception;
+    private Queue<AuditLogContext> auditLogContexts;
 
-    EnforcementResponse(boolean success, @Nullable Exception exception) {
+    EnforcementResponse(boolean success, @Nullable Queue<AuditLogContext> auditLogContexts,
+                        @Nullable Exception exception) {
       this.success = success;
+      this.auditLogContexts = auditLogContexts;
       this.exception = exception;
     }
 
@@ -125,10 +140,18 @@ public class RemoteAccessEnforcer extends AbstractAccessEnforcer {
     public Exception getException() {
       return exception;
     }
+
+    /**
+     * Get the queue of audit log contexts that was set on an operation previously.
+     * @return auditLogContexts
+     */
+    public Queue<AuditLogContext> getAuditLogContexts() {
+      return auditLogContexts;
+    }
   }
 
   private final LoadingCache<AuthorizationPrivilege, EnforcementResponse> authPolicyCache;
-  private final LoadingCache<VisibilityKey, Boolean> visibilityCache;
+  private final LoadingCache<VisibilityKey, VisibilityValue> visibilityCache;
 
   @Inject
   public RemoteAccessEnforcer(CConfiguration cConf, RemoteClientFactory remoteClientFactory) {
@@ -158,16 +181,16 @@ public class RemoteAccessEnforcer extends AbstractAccessEnforcer {
     visibilityCache = CacheBuilder.newBuilder()
         .expireAfterAccess(cacheTTLSecs, TimeUnit.SECONDS)
         .maximumSize(perCacheSize)
-        .build(new CacheLoader<VisibilityKey, Boolean>() {
+        .build(new CacheLoader<VisibilityKey, VisibilityValue>() {
           @Override
           @ParametersAreNonnullByDefault
-          public Boolean load(VisibilityKey key) throws Exception {
+          public VisibilityValue load(VisibilityKey key) throws Exception {
             LOG.trace("Cache miss for {}", key);
-            return !loadVisibility(Collections.singleton(key)).isEmpty();
+            return loadVisibility(Collections.singleton(key)).get(key);
           }
 
           @Override
-          public Map<VisibilityKey, Boolean> loadAll(Iterable<? extends VisibilityKey> keys)
+          public Map<VisibilityKey, VisibilityValue> loadAll(Iterable<? extends VisibilityKey> keys)
               throws Exception {
             LOG.trace("Cache miss for {}", keys);
             return loadVisibility(keys);
@@ -187,6 +210,11 @@ public class RemoteAccessEnforcer extends AbstractAccessEnforcer {
     try {
       EnforcementResponse res = cacheEnabled
           ? authPolicyCache.get(authorizationPrivilege) : doEnforce(authorizationPrivilege);
+
+      if (res.getAuditLogContexts() != null && !res.getAuditLogContexts().isEmpty()) {
+        SecurityRequestContext.enqueueAuditLogContext(res.getAuditLogContexts());
+      }
+
       if (!res.isSuccess()) {
         throw res.getException();
       }
@@ -209,6 +237,11 @@ public class RemoteAccessEnforcer extends AbstractAccessEnforcer {
     try {
       EnforcementResponse res = cacheEnabled
           ? authPolicyCache.get(authorizationPrivilege) : doEnforce(authorizationPrivilege);
+
+      if (res.getAuditLogContexts() != null && !res.getAuditLogContexts().isEmpty()) {
+        SecurityRequestContext.enqueueAuditLogContext(res.getAuditLogContexts());
+      }
+
       if (!res.isSuccess()) {
         throw res.getException();
       }
@@ -229,10 +262,31 @@ public class RemoteAccessEnforcer extends AbstractAccessEnforcer {
     try {
       if (cacheEnabled) {
         Iterable<VisibilityKey> visibilityKeys = toVisibilityKeys(principal, entityIds);
-        ImmutableMap<VisibilityKey, Boolean> visibilityMap = visibilityCache.getAll(visibilityKeys);
-        return toEntityIds(Maps.filterEntries(visibilityMap, VISIBILITY_KEYS_FILTER).keySet());
+        ImmutableMap<VisibilityKey, VisibilityValue> visibilityMap = visibilityCache.getAll(visibilityKeys);
+
+        visibilityMap.values().forEach(visibilityValue -> {
+          if (visibilityValue.getAuditLogContext() != null &&
+            visibilityValue.getAuditLogContext().isAuditLoggingRequired()) {
+            SecurityRequestContext.enqueueAuditLogContext(visibilityValue.getAuditLogContext());
+          }
+        });
+
+        return toEntityIds(Maps.filterEntries(visibilityMap, VISIBILITY_KEYS_IS_VISIBLE_FILTER).keySet());
       } else {
-        return visibilityCheckCall(new VisibilityRequest(principal, entityIds));
+
+        Map<? extends EntityId, AuthorizationResponse> entityAuthMap =
+          visibilityCheckCall(new VisibilityRequest(principal, entityIds));
+        entityAuthMap.values().forEach(authRes -> {
+          if (authRes.getAuditLogContext()!= null && authRes.getAuditLogContext().isAuditLoggingRequired()){
+            SecurityRequestContext.enqueueAuditLogContext(authRes.getAuditLogContext());
+          }
+        });
+
+        return entityAuthMap.entrySet()
+          .stream()
+          .filter(entry -> entry.getValue().isAuthorized() != AuthorizationResponse.AuthorizationStatus.UNAUTHORIZED)
+          .map(Map.Entry::getKey)
+          .collect(Collectors.toSet());
       }
     } catch (Exception e) {
       throw AuthEnforceUtil.propagateAccessException(e);
@@ -253,28 +307,47 @@ public class RemoteAccessEnforcer extends AbstractAccessEnforcer {
     LOG.trace("Remotely enforcing on authorization privilege {}", authorizationPrivilege);
     try {
       HttpResponse response = remoteClient.execute(request);
-      if (response.getResponseCode() == HttpURLConnection.HTTP_OK) {
-        return new EnforcementResponse(true, null);
+      Queue<AuditLogContext> deserializedQueue = GSON.fromJson(response.getResponseBodyAsString(),
+          AUDIT_LOG_QUEUE_TYPE);
+      switch (response.getResponseCode()) {
+        case HttpURLConnection.HTTP_OK:
+          return new EnforcementResponse(true, deserializedQueue, null);
+
+        default:
+          return new EnforcementResponse(false,
+              deserializedQueue,
+              new IOException(String.format("Failed to enforce with code %d: %s",
+                  response.getResponseCode(),
+                  response.getResponseBodyAsString())));
       }
-      return new EnforcementResponse(false,
-          new IOException(String.format("Failed to enforce with code %d: %s",
-              response.getResponseCode(),
-              response.getResponseBodyAsString())));
     } catch (UnauthorizedException e) {
-      return new EnforcementResponse(false, e);
+      try {
+        Queue<AuditLogContext> deserializedQueue = GSON.fromJson(e.getMessage(), AUDIT_LOG_QUEUE_TYPE);
+        return new EnforcementResponse(false,
+            deserializedQueue,
+            new UnauthorizedException(
+                authorizationPrivilege.getPrincipal(),
+                authorizationPrivilege.getPermissions(),
+                authorizationPrivilege.getEntity(),
+                true, false));
+
+      } catch (Exception ex) {
+        // no-op
+      }
+      return new EnforcementResponse(false, null, e);
     }
   }
 
-  private Set<? extends EntityId> visibilityCheckCall(VisibilityRequest visibilityRequest)
+  private Map<? extends EntityId, AuthorizationResponse> visibilityCheckCall(VisibilityRequest visibilityRequest)
       throws IOException, UnauthorizedException {
     HttpRequest request = remoteClient.requestBuilder(HttpMethod.POST, "isVisible")
         .withBody(GSON.toJson(visibilityRequest))
         .build();
     LOG.trace("Remotely checking visibility on authorization privilege {}", visibilityRequest);
-    return GSON.fromJson(remoteClient.execute(request).getResponseBodyAsString(), SET_ENTITY_TYPE);
+    return GSON.fromJson(remoteClient.execute(request).getResponseBodyAsString(), MAP_ENTITY_TYPE);
   }
 
-  private Map<VisibilityKey, Boolean> loadVisibility(Iterable<? extends VisibilityKey> keys)
+  private Map<VisibilityKey, VisibilityValue> loadVisibility(Iterable<? extends VisibilityKey> keys)
       throws IOException, UnauthorizedException {
     if (!keys.iterator().hasNext()) {
       return Collections.emptyMap();
@@ -282,12 +355,14 @@ public class RemoteAccessEnforcer extends AbstractAccessEnforcer {
 
     // It is okay to use the first principal here, since isVisible request will always come for a single principal
     Principal principal = keys.iterator().next().getPrincipal();
-    Set<? extends EntityId> visibleEntities = visibilityCheckCall(
+    Map<? extends EntityId, AuthorizationResponse> visibleEntitiesMap = visibilityCheckCall(
         new VisibilityRequest(principal, toEntityIds(keys)));
 
-    Map<VisibilityKey, Boolean> keyMap = new HashMap<>();
+    Map<VisibilityKey, VisibilityValue> keyMap = new HashMap<>();
     for (VisibilityKey key : keys) {
-      keyMap.put(key, visibleEntities.contains(key.getEntityId()));
+      AuthorizationResponse.AuthorizationStatus authStatus = visibleEntitiesMap.get(key.entityId).isAuthorized();
+      boolean isVisible = !authStatus.equals(AuthorizationResponse.AuthorizationStatus.UNAUTHORIZED);
+      keyMap.put(key, new VisibilityValue(isVisible, visibleEntitiesMap.get(key.entityId).getAuditLogContext()));
     }
     return keyMap;
   }
@@ -348,6 +423,24 @@ public class RemoteAccessEnforcer extends AbstractAccessEnforcer {
           + "principal=" + principal
           + ", entityId=" + entityId
           + '}';
+    }
+  }
+
+  private static class VisibilityValue {
+    private final boolean isVisible;
+    private final AuditLogContext auditLogContext;
+
+    private VisibilityValue(boolean isVisible, AuditLogContext auditLogContext) {
+      this.isVisible = isVisible;
+      this.auditLogContext = auditLogContext;
+    }
+
+    public boolean isVisible() {
+      return isVisible;
+    }
+
+    public AuditLogContext getAuditLogContext() {
+      return auditLogContext;
     }
   }
 }

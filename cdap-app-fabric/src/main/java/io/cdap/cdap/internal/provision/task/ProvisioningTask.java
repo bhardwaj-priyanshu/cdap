@@ -17,6 +17,10 @@
 
 package io.cdap.cdap.internal.provision.task;
 
+import io.cdap.cdap.api.exception.ErrorType;
+import io.cdap.cdap.api.exception.ErrorUtils;
+import io.cdap.cdap.api.exception.FailureDetailsProvider;
+import io.cdap.cdap.api.exception.ProgramFailureException;
 import io.cdap.cdap.common.async.RepeatedTask;
 import io.cdap.cdap.common.lang.Exceptions;
 import io.cdap.cdap.common.logging.LogSamplers;
@@ -24,7 +28,7 @@ import io.cdap.cdap.common.logging.Loggers;
 import io.cdap.cdap.common.service.Retries;
 import io.cdap.cdap.common.service.RetryStrategies;
 import io.cdap.cdap.common.service.RetryStrategy;
-import io.cdap.cdap.internal.provision.ProvisionerTable;
+import io.cdap.cdap.internal.provision.ProvisionerStore;
 import io.cdap.cdap.internal.provision.ProvisioningOp;
 import io.cdap.cdap.internal.provision.ProvisioningTaskInfo;
 import io.cdap.cdap.internal.provision.ProvisioningTaskKey;
@@ -62,6 +66,7 @@ public abstract class ProvisioningTask implements RepeatedTask {
   private final TransactionRunner transactionRunner;
   private final ProvisioningTaskKey taskKey;
   private final ProvisioningTaskInfo initialTaskInfo;
+  private final ProvisionerStore provisionerStore;
 
   private ProvisioningTaskInfo taskInfo;
   private RetryStrategy retryStrategy;
@@ -72,10 +77,11 @@ public abstract class ProvisioningTask implements RepeatedTask {
 
   protected ProvisioningTask(Provisioner provisioner, ProvisionerContext provisionerContext,
       ProvisioningTaskInfo initialTaskInfo, TransactionRunner transactionRunner,
-      int retryTimeLimitSecs) {
+      ProvisionerStore provisionerStore, int retryTimeLimitSecs) {
     this.provisioner = provisioner;
     this.provisionerContext = provisionerContext;
     this.initialTaskInfo = initialTaskInfo;
+    this.provisionerStore = provisionerStore;
     this.taskKey = new ProvisioningTaskKey(initialTaskInfo.getProgramRunId(),
         initialTaskInfo.getProvisioningOp().getType());
     this.programRunId = initialTaskInfo.getProgramRunId();
@@ -105,14 +111,16 @@ public abstract class ProvisioningTask implements RepeatedTask {
     }
 
     // Get the sub-task to execute
+    ProvisioningOp.Type type = currentTaskInfo.getProvisioningOp().getType();
     ProvisioningSubtask subtask = subTasks.get(state);
     if (subtask == null) {
       // should never happen
-      throw new IllegalStateException(
-          String.format("Invalid state '%s' in provisioning task for program run '%s'. "
-                  + "This means there is a bug in provisioning state machine. "
-                  + "Please reach out to the development team.",
-              state, programRunId));
+      String errorReason = String.format("Invalid state '%s' in provisioning task for "
+              + "program run '%s'.", state, programRunId);
+      String errorMessage = String.format("%s This means there is a bug in provisioning state"
+          + "machine. Please reach out to the development team.", errorReason);
+      throw ErrorUtils.getProgramFailureException(provisionerContext.getErrorCategory(),
+          errorReason, errorMessage, ErrorType.SYSTEM, false, null);
     }
     if (subtask == EndSubtask.INSTANCE) {
       LOG.debug("Completed {} task for program run {}.",
@@ -158,10 +166,16 @@ public abstract class ProvisioningTask implements RepeatedTask {
     } catch (InterruptedException e) {
       throw e;
     } catch (Throwable e) {
-      LOG.error("{} task failed in {} state for program run {} due to {}.",
-          currentTaskInfo.getProvisioningOp().getType(), state, programRunId,
-          Exceptions.condenseThrowableMessage(e), e);
-      handleSubtaskFailure(currentTaskInfo, e);
+      String errorReason = String.format("'%s' task failed in '%s' state for program run '%s'",
+          currentTaskInfo.getProvisioningOp().getType(), state, programRunId);
+      ProgramFailureException ex = null;
+      if (!(e instanceof FailureDetailsProvider)) {
+        ex = ErrorUtils.getProgramFailureException(provisionerContext.getErrorCategory(),
+            errorReason, Exceptions.condenseThrowableMessage(e), ErrorType.UNKNOWN, false, e);
+      }
+      LOG.error("{} due to {}.", errorReason,
+          Exceptions.condenseThrowableMessage(ex == null ? e : ex), ex == null ? e : ex);
+      handleSubtaskFailure(currentTaskInfo, ex);
       ProvisioningOp failureOp = new ProvisioningOp(currentTaskInfo.getProvisioningOp().getType(),
           ProvisioningOp.Status.FAILED);
       ProvisioningTaskInfo failureInfo = new ProvisioningTaskInfo(currentTaskInfo, failureOp,
@@ -174,7 +188,7 @@ public abstract class ProvisioningTask implements RepeatedTask {
   }
 
   /**
-   * Write the task state to the {@link ProvisionerTable}, retrying if any exception is caught.
+   * Write the task state to the {@link ProvisionerStore}, retrying if any exception is caught.
    * Before persisting the state, the current state will be checked. If the current state is
    * cancelled, it will not be overwritten.
    *
@@ -192,14 +206,13 @@ public abstract class ProvisioningTask implements RepeatedTask {
       // Stop retrying if we are interrupted. Otherwise, retry on every exception, up to the retry limit
       return Retries.callWithInterruptibleRetries(
           () -> TransactionRunners.run(transactionRunner, context -> {
-            ProvisionerTable provisionerTable = new ProvisionerTable(context);
-            ProvisioningTaskInfo currentState = provisionerTable.getTaskInfo(taskKey);
+            ProvisioningTaskInfo currentState = provisionerStore.getTaskInfo(taskKey);
             // if the state is cancelled, don't write anything and transition to the end subtask.
             if (currentState != null && currentState.getProvisioningOp().getStatus()
                 == ProvisioningOp.Status.CANCELLED) {
               return currentState;
             }
-            provisionerTable.putTaskInfo(taskInfo);
+            provisionerStore.putTaskInfo(taskInfo);
             return taskInfo;
           }), retryStrategy, t -> true);
     } catch (RuntimeException e) {

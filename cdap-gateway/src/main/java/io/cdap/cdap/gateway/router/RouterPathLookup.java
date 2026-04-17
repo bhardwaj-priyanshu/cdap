@@ -38,6 +38,8 @@ public final class RouterPathLookup extends AbstractHttpHandler {
 
   public static final RouteDestination APP_FABRIC_HTTP = new RouteDestination(
       Constants.Service.APP_FABRIC_HTTP);
+  public static final RouteDestination APP_FABRIC_PROCESSOR = new RouteDestination(
+      Constants.Service.APP_FABRIC_PROCESSOR);
   public static final RouteDestination METRICS = new RouteDestination(Constants.Service.METRICS);
   public static final RouteDestination DATASET_MANAGER = new RouteDestination(
       Constants.Service.DATASET_MANAGER);
@@ -47,11 +49,7 @@ public final class RouterPathLookup extends AbstractHttpHandler {
       Constants.Service.PREVIEW_HTTP);
   public static final RouteDestination TRANSACTION = new RouteDestination(
       Constants.Service.TRANSACTION_HTTP);
-  public static final RouteDestination LOG_QUERY = new RouteDestination(
-      Constants.Service.LOG_QUERY);
   public static final RouteDestination LOG_SAVER = new RouteDestination(Constants.Service.LOGSAVER);
-  public static final RouteDestination METRICS_PROCESSOR = new RouteDestination(
-      Constants.Service.METRICS_PROCESSOR);
   public static final RouteDestination DATASET_EXECUTOR = new RouteDestination(
       Constants.Service.DATASET_EXECUTOR);
   public static final RouteDestination MESSAGING = new RouteDestination(
@@ -103,7 +101,7 @@ public final class RouterPathLookup extends AbstractHttpHandler {
       // This needs to now changed especially metadata since now it can have custom parts
       return null;
     } else if ("bootstrap".equals(uriParts[1])) {
-      return APP_FABRIC_HTTP;
+      return APP_FABRIC_PROCESSOR;
     } else if ((uriParts.length >= 11) && "versions".equals(uriParts[5]) && isUserServiceType(
         uriParts[7])
         && "methods".equals(uriParts[9])) {
@@ -123,7 +121,22 @@ public final class RouterPathLookup extends AbstractHttpHandler {
           uriParts[6]));
     } else if (beginsWith(uriParts, "v3", "system", "services", null, "logs")) {
       //Log Handler Path /v3/system/services/<service-id>/logs
-      return LOG_QUERY;
+      return LOG_SAVER;
+    } else if (beginsWith(uriParts, "v3", "namespaces", null)
+        && (endsWith(uriParts, "instances")
+          || endsWith(uriParts, "live-info")
+          || endsWith(uriParts, "loglevels")
+          || endsWith(uriParts, "resetloglevels"))) {
+      // ProgramRuntimeLifecycleHttpHandler Paths:
+      // v3/namespaces/{ns-id}/instances
+      // v3/namespaces/{ns-id}/apps/{app-id}/services/{service-id}/instances
+      // v3/namespaces/{ns-id}/apps/{app-id}/workers/{worker-id}/instances
+      // v3/namespaces/{ns-id}/apps/{app-id}/{program-category}/{program-id}/live-info
+      // v3/namespaces/{ns-id}/apps/{app-name}/{program-type}/{program-name}/runs/{run-id}/loglevels
+      // v3/namespaces/{ns-id}/apps/{app-name}/versions/{appVer}/{progType}/{progName}/runs/{runId}/loglevels
+      // v3/namespaces/{ns-id}/apps/{app-name}/{program-type}/{progName}/runs/{runId}/resetloglevels
+      // v3/namespaces/{ns-id}/apps/{app-name}/versions/{appVer}/{progType}/{progName}/runs/{runId}/resetloglevels
+      return APP_FABRIC_PROCESSOR;
     } else if ((!beginsWith(uriParts, "v3", "namespaces", null, "securekeys")) && (
         endsWith(uriParts, "metadata")
             ||
@@ -161,13 +174,43 @@ public final class RouterPathLookup extends AbstractHttpHandler {
     } else if (beginsWith(uriParts, "v3", "namespaces", null, "credentials")
         || beginsWith(uriParts, "v3", "credentials")) {
       return APP_FABRIC_HTTP;
+    } else if (beginsWith(uriParts, "v3", "namespaces", null, "schedules")
+        || beginsWith(uriParts, "v3", "namespaces", null, "apps", null, "schedules")
+        || beginsWith(uriParts, "v3", "namespaces", null, "apps", null, null, null, "schedules")
+        || beginsWith(uriParts, "v3", "namespaces", null, "apps", null, "versions", null, "schedules")
+        || beginsWith(uriParts, "v3", "namespaces", null, "apps", null, "versions", null, null, null, "schedules")
+        || beginsWith(uriParts, "v3", "namespaces", null, "previousruntime")
+        || beginsWith(uriParts, "v3", "namespaces", null, "nextruntime")
+        || beginsWith(uriParts, "v3", "namespaces", null, "apps", null, null, null, "previousruntime")
+        || beginsWith(uriParts, "v3", "namespaces", null, "apps", null, null, null, "nextruntime")) {
+      // Program Schedule handler paths:
+      // /v3/namespaces/{namespace-id}/apps/{app-name}/{program-type}/{program-name}/schedules
+      // /v3/namespaces/{namespace-id}/apps/{app-name}/versions/{app-version}/{program-type}/{program-name}/schedules
+      // /v3/namespaces/{namespace-id}/apps/{app-name}/schedules
+      // /v3/namespaces/{namespace-id}/apps/{app-name}/schedules/{schedule-name}
+      // /v3/namespaces/{namespace-id}/apps/{app-name}/schedules/{schedule-name}/update
+      // /v3/namespaces/{namespace-id}/apps/{app-id}/schedules/{schedule-name}/{action}
+      // /v3/namespaces/{namespace-id}/apps/{app-name}/versions/{app-version}/schedules
+      // /v3/namespaces/{namespace-id}/apps/{app-name}/versions/{app-version}/schedules/{schedule-name}
+      // /v3/namespaces/{namespace-id}/apps/{app-name}/versions/{app-version}/schedules/{schedule-name}/update
+      // /v3/namespaces/{namespace-id}/apps/{app-id}/versions/{version-id}/schedules/{schedule-name}/status
+      // /v3/namespaces/{namespace-id}/apps/{app-id}/versions/{app-version}/schedules/{schedule-name}/{action}
+      // /v3/namespaces/{namespace-id}/schedules/re-enable
+      // /v3/namespaces/{namespace-id}/schedules/trigger-type/program-status
+      // /v3/namespaces/{namespace-id}/apps/{app-name}/{program-type}/{program-name}/previousruntime
+      // /v3/namespaces/{namespace-id}/apps/{app-name}/{program-type}/{program-name}/nextruntime
+      // /v3/namespaces/{namespace-id}/previousruntime
+      // /v3/namespaces/{namespace-id}/nextruntime
+      // /v3/namespaces/{namespace-id}/apps/{app-id}/{program-type}/{program-id}/status
+      return APP_FABRIC_PROCESSOR;
     } else if ((uriParts.length >= 8 && uriParts[7].equals("logs"))
-        || (uriParts.length >= 10 && uriParts[9].equals("logs"))
+        || (uriParts.length >= 10 && (uriParts[9].equals("logs") || uriParts[9].equals("classify")))
         || (uriParts.length >= 6 && uriParts[5].equals("logs"))) {
       //Log Handler Paths:
       // /v3/namespaces/<namespaceid>/apps/<appid>/<programid-type>/<programid>/logs
       // /v3/namespaces/{namespace-id}/apps/{app-id}/{program-type}/{program-id}/runs/{run-id}/logs
-      return LOG_QUERY;
+      // /v3/namespaces/{namespace-id}/apps/{app-id}/{program-type}/{program-id}/runs/{run-id}/classify
+      return LOG_SAVER;
     } else if (uriParts.length >= 2 && uriParts[1].equals("metrics")) {
       //Metrics Search Handler Path /v3/metrics
       return METRICS;
@@ -178,12 +221,12 @@ public final class RouterPathLookup extends AbstractHttpHandler {
           return LOG_SAVER;
         case Constants.Service.TRANSACTION:
           return TRANSACTION;
-        case Constants.Service.METRICS_PROCESSOR:
-          return METRICS_PROCESSOR;
         case Constants.Service.METRICS:
           return METRICS;
         case Constants.Service.APP_FABRIC_HTTP:
           return APP_FABRIC_HTTP;
+        case Constants.Service.APP_FABRIC_PROCESSOR:
+          return APP_FABRIC_PROCESSOR;
         case Constants.Service.DATASET_EXECUTOR:
           return DATASET_EXECUTOR;
         case Constants.Service.METADATA_SERVICE:
@@ -220,6 +263,8 @@ public final class RouterPathLookup extends AbstractHttpHandler {
       // we don't want to expose endpoints for direct metadata mutation from CDAP master
       // /v3/metadata-internals/{mutation-type}
       return DONT_ROUTE;
+    } else if ((uriParts.length == 2) && beginsWith(uriParts, "v3", "dashboard")) {
+      return APP_FABRIC_PROCESSOR;
     }
     return APP_FABRIC_HTTP;
   }

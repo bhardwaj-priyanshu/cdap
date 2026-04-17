@@ -16,6 +16,8 @@
 
 package io.cdap.cdap.api.exception;
 
+import javax.annotation.Nullable;
+
 /**
  * Exception class representing a program failure with detailed error information.
  * <p>
@@ -38,66 +40,71 @@ package io.cdap.cdap.api.exception;
  *   dependent service.</li>
  * </ul>
  **/
-public class ProgramFailureException extends RuntimeException {
+public class ProgramFailureException extends RuntimeException implements FailureDetailsProvider {
   private final ErrorCategory errorCategory;
   private final String errorReason;
   private final ErrorType errorType;
   private final boolean dependency;
+  private final ErrorCodeType errorCodeType;
+  private final String errorCode;
+  private final String supportedDocumentationUrl;
 
-  // Private constructor to prevent direct instantiation
   private ProgramFailureException(ErrorCategory errorCategory, String errorMessage,
-      String errorReason, ErrorType errorType, Throwable cause, boolean dependency) {
+      String errorReason, ErrorType errorType, Throwable cause, boolean dependency,
+      ErrorCodeType errorCodeType, String errorCode, String supportedDocumentationUrl) {
     super(errorMessage, cause);
     this.errorCategory = errorCategory;
     this.errorReason = errorReason;
     this.errorType = errorType;
     this.dependency = dependency;
+    this.errorCodeType = errorCodeType;
+    this.errorCode = errorCode;
+    this.supportedDocumentationUrl = supportedDocumentationUrl;
   }
 
-  /**
-   * Returns the category of the error.
-   *
-   * <p>This typically provides a high-level classification of the error,
-   * such as plugin, provisioning, etc.
-   * If the category or reason is not known - it will be marked as  ‘Others’.
-   *
-   * @return a {@String} representing the error category.
-   */
-  public String getErrorCategory() {
-    return errorCategory.getErrorCategory();
-  }
-
-  /**
-   * Returns the reason for the error.
-   *
-   * <p>The reason usually explains why the error occurred, such as a specific validation failure
-   * or an unexpected condition.
-   *
-   * @return a {@String} representing the error reason.
-   */
+  @Nullable
+  @Override
   public String getErrorReason() {
     return errorReason;
   }
 
-  /**
-   * Returns the type of the error.
-   *
-   * <p>This method provides information on whether the error is classified as a
-   * system-level error, a user-caused error, or an unknown type of error.
-   *
-   * @return an {@ErrorType} enum value representing the type of the error.
-   */
-  public ErrorType getErrorType() {
-    return errorType == null ? ErrorType.UNKNOWN : errorType;
+  @Override
+  public ErrorCategory getErrorCategory() {
+    if (errorCategory == null) {
+      return FailureDetailsProvider.super.getErrorCategory();
+    }
+    return errorCategory;
   }
 
-  /**
-   * Returns whether the error is coming from a dependent service.
-   *
-   * @return true if the error is a dependency service error, false otherwise.
-   */
+  @Override
+  public ErrorType getErrorType() {
+    if (errorType == null) {
+      return FailureDetailsProvider.super.getErrorType();
+    }
+    return errorType;
+  }
+
+  @Override
   public boolean isDependency() {
     return dependency;
+  }
+
+  @Nullable
+  @Override
+  public ErrorCodeType getErrorCodeType() {
+    return errorCodeType;
+  }
+
+  @Nullable
+  @Override
+  public String getErrorCode() {
+    return errorCode;
+  }
+
+  @Nullable
+  @Override
+  public String getSupportedDocumentationUrl() {
+    return supportedDocumentationUrl;
   }
 
   /**
@@ -109,7 +116,10 @@ public class ProgramFailureException extends RuntimeException {
     private String errorReason;
     private ErrorType errorType;
     private Throwable cause;
+    private ErrorCodeType errorCodeType;
+    private String errorCode;
     private boolean dependency;
+    private String supportedDocumentationUrl;
 
     /**
      * Sets the error category for the ProgramFailureException.
@@ -178,13 +188,47 @@ public class ProgramFailureException extends RuntimeException {
     }
 
     /**
+     * Sets the error code type for the ProgramFailureException.
+     *
+     * @param errorCodeType The type of error code.
+     * @return The current Builder instance.
+     */
+    public Builder withErrorCodeType(ErrorCodeType errorCodeType) {
+      this.errorCodeType = errorCodeType;
+      return this;
+    }
+
+    /**
+     * Sets the error code for the ProgramFailureException.
+     *
+     * @param errorCode The error code.
+     * @return The current Builder instance.
+     */
+    public Builder withErrorCode(String errorCode) {
+      this.errorCode = errorCode;
+      return this;
+    }
+
+    /**
+     * Sets the supported documentation URL for the ProgramFailureException.
+     *
+     * @param supportedDocumentationUrl The URL to the documentation.
+     * @return The current Builder instance.
+     */
+    public Builder withSupportedDocumentationUrl(String supportedDocumentationUrl) {
+      this.supportedDocumentationUrl = supportedDocumentationUrl;
+      return this;
+    }
+
+    /**
      * Builds and returns a new instance of ProgramFailureException.
      *
      * @return A new ProgramFailureException instance.
      */
     public ProgramFailureException build() {
       return new ProgramFailureException(errorCategory, errorMessage,
-          errorReason, errorType, cause, dependency);
+          errorReason, errorType, cause, dependency,
+          errorCodeType, errorCode, supportedDocumentationUrl);
     }
   }
 }

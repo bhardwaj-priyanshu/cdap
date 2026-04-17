@@ -48,7 +48,7 @@ public class RouterPathLookupTest {
     String path = "/v3/bootstrap";
     HttpRequest httpRequest = new DefaultHttpRequest(VERSION, new HttpMethod("POST"), path);
     RouteDestination result = pathLookup.getRoutingService(path, httpRequest);
-    Assert.assertEquals(RouterPathLookup.APP_FABRIC_HTTP, result);
+    Assert.assertEquals(RouterPathLookup.APP_FABRIC_PROCESSOR, result);
   }
 
   @Test
@@ -83,7 +83,7 @@ public class RouterPathLookupTest {
     String path = "/v3/system/services/foo/logs";
     HttpRequest httpRequest = new DefaultHttpRequest(VERSION, new HttpMethod("GET"), path);
     RouteDestination result = pathLookup.getRoutingService(path, httpRequest);
-    Assert.assertEquals(RouterPathLookup.LOG_QUERY, result);
+    Assert.assertEquals(RouterPathLookup.LOG_SAVER, result);
 
     path = "/v3/system/services/foo/live-info";
     httpRequest = new DefaultHttpRequest(VERSION, new HttpMethod("GET"), path);
@@ -145,17 +145,17 @@ public class RouterPathLookupTest {
     String path = "/v3/namespaces/default/apps//InvalidApp///services/ServiceName/logs/";
     HttpRequest httpRequest = new DefaultHttpRequest(VERSION, new HttpMethod("GET"), path);
     RouteDestination result = pathLookup.getRoutingService(path, httpRequest);
-    Assert.assertEquals(RouterPathLookup.LOG_QUERY, result);
+    Assert.assertEquals(RouterPathLookup.LOG_SAVER, result);
 
     path = "///v3/namespaces/default///apps/InvalidApp/services/ServiceName/////logs";
     httpRequest = new DefaultHttpRequest(VERSION, new HttpMethod("POST"), path);
     result = pathLookup.getRoutingService(path, httpRequest);
-    Assert.assertEquals(RouterPathLookup.LOG_QUERY, result);
+    Assert.assertEquals(RouterPathLookup.LOG_SAVER, result);
 
     path = "/v3/namespaces/default/apps/InvalidApp/service/ServiceName/runs/7e6adc79-0f5d-4252-70817ea47698/logs/";
     httpRequest = new DefaultHttpRequest(VERSION, new HttpMethod("GET"), path);
     result = pathLookup.getRoutingService(path, httpRequest);
-    Assert.assertEquals(RouterPathLookup.LOG_QUERY, result);
+    Assert.assertEquals(RouterPathLookup.LOG_SAVER, result);
   }
 
   @Test
@@ -218,7 +218,7 @@ public class RouterPathLookupTest {
 
   @Test
   public void testOpsDashboardPath() {
-    assertRouting("/v3/dashboard", RouterPathLookup.APP_FABRIC_HTTP);
+    assertRouting("/v3/dashboard", RouterPathLookup.APP_FABRIC_PROCESSOR);
   }
 
   @Test
@@ -250,7 +250,7 @@ public class RouterPathLookupTest {
     String path = "/v3/namespaces/default//apps/WordCount/services/WordCountService/instances";
     HttpRequest httpRequest = new DefaultHttpRequest(VERSION, new HttpMethod("PUT"), path);
     RouteDestination result = pathLookup.getRoutingService(path, httpRequest);
-    Assert.assertEquals(RouterPathLookup.APP_FABRIC_HTTP,  result);
+    Assert.assertEquals(RouterPathLookup.APP_FABRIC_PROCESSOR,  result);
   }
 
   @Test
@@ -288,8 +288,8 @@ public class RouterPathLookupTest {
     assertRouting("/v3/namespaces/default//artifacts/WordCount///versions/v1//metadata/properties",
                   RouterPathLookup.METADATA_SERVICE);
     // program metadata properties
-    assertRouting("/v3/namespaces/default//apps/WordCount/services/ServiceName/metadata/properties"
-      , RouterPathLookup.METADATA_SERVICE);
+    assertRouting("/v3/namespaces/default//apps/WordCount/services/ServiceName/metadata/properties",
+        RouterPathLookup.METADATA_SERVICE);
     // dataset metadata properties
     assertRouting("/v3/namespaces/default/////datasets/ds1/metadata/properties", RouterPathLookup.METADATA_SERVICE);
     // app metadata tags
@@ -370,12 +370,12 @@ public class RouterPathLookupTest {
                   RouterPathLookup.LOG_SAVER);
     assertRouting(String.format("/v3/system/services/%s/status", Constants.Service.TRANSACTION),
                   RouterPathLookup.TRANSACTION);
-    assertRouting(String.format("/v3/system/services/%s/status", Constants.Service.METRICS_PROCESSOR),
-                  RouterPathLookup.METRICS_PROCESSOR);
     assertRouting(String.format("/v3/system/services/%s/status", Constants.Service.METRICS),
                   RouterPathLookup.METRICS);
     assertRouting(String.format("/v3/system/services/%s/status", Constants.Service.APP_FABRIC_HTTP),
                   RouterPathLookup.APP_FABRIC_HTTP);
+    assertRouting(String.format("/v3/system/services/%s/status", Constants.Service.APP_FABRIC_PROCESSOR),
+        RouterPathLookup.APP_FABRIC_PROCESSOR);
     assertRouting(String.format("/v3/system/services/%s/status", Constants.Service.DATASET_EXECUTOR),
                   RouterPathLookup.DATASET_EXECUTOR);
     assertRouting(String.format("/v3/system/services/%s/status", Constants.Service.METADATA_SERVICE),
@@ -391,8 +391,6 @@ public class RouterPathLookupTest {
                   RouterPathLookup.LOG_SAVER);
     assertRouting(String.format("/v3/system/services/%s/stacks", Constants.Service.TRANSACTION),
                   RouterPathLookup.TRANSACTION);
-    assertRouting(String.format("/v3/system/services/%s/stacks", Constants.Service.METRICS_PROCESSOR),
-                  RouterPathLookup.METRICS_PROCESSOR);
     assertRouting(String.format("/v3/system/services/%s/stacks", Constants.Service.METRICS),
                   RouterPathLookup.METRICS);
     assertRouting(String.format("/v3/system/services/%s/stacks", Constants.Service.APP_FABRIC_HTTP),
@@ -416,6 +414,73 @@ public class RouterPathLookupTest {
     assertRouting("v3/namespaces/default/profiles/p", RouterPathLookup.APP_FABRIC_HTTP);
     assertRouting("v3/namespaces/default/profiles/p/enable", RouterPathLookup.APP_FABRIC_HTTP);
     assertRouting("v3/namespaces/default/profiles/p/disable", RouterPathLookup.APP_FABRIC_HTTP);
+  }
+
+  @Test
+  public void testAppLifecycleAndWorkflowPaths() {
+    assertRouting("v3/namespaces/default/apps", RouterPathLookup.APP_FABRIC_HTTP);
+    assertRouting("v3/namespaces/default/apps/myapp", RouterPathLookup.APP_FABRIC_HTTP);
+    assertRouting("v3/namespaces/default/upgrade", RouterPathLookup.APP_FABRIC_HTTP);
+    assertRouting("v3/namespaces/default/appdetail", RouterPathLookup.APP_FABRIC_HTTP);
+  }
+
+  @Test
+  public void testProgramLifecycleInternalAndAppLifecycleInternalPaths() {
+    assertRouting("v3Internal/namespaces//apps//versions//workflows/DataPipelineWorkflow/runs/",
+        RouterPathLookup.APP_FABRIC_HTTP);
+  }
+
+  @Test
+  public void testUsagePaths() {
+    assertRouting("v3/namespaces//apps//datasets", RouterPathLookup.APP_FABRIC_HTTP);
+    assertRouting("v3/namespaces//apps////datasets", RouterPathLookup.APP_FABRIC_HTTP);
+  }
+
+  @Test
+  public void testAppPreferencesPaths() {
+    assertRouting("v3/namespaces//apps//preferences", RouterPathLookup.APP_FABRIC_HTTP);
+    assertRouting("v3/namespaces//apps////preferences", RouterPathLookup.APP_FABRIC_HTTP);
+  }
+
+  @Test
+  public void testProgramRuntimeLifecyclePaths() {
+    assertRouting("v3/namespaces//instances", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces//apps//services//instances", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces//apps//workers//instances", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces//apps////live-info", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces//apps////runs//loglevels", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces//apps////runs//resetloglevels", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces//apps//versions////runs//loglevels", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces//apps//versions////runs//resetloglevels", RouterPathLookup.APP_FABRIC_PROCESSOR);
+  }
+
+  @Test
+  public void testProgramSchedulePaths() {
+    assertRouting("v3/namespaces/{ns}/apps/{app}/{ptype}/{pname}/schedules", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/versions/{ver}/{ptype}/{name}/schedules",
+        RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/schedules", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/schedules/", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/schedules/{sched}/update", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/schedules/{sched}/status", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/schedules/{sched}/{action}", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/versions/{ver}/schedules", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/versions/{ver}/schedules/{sched}",
+        RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/versions/{ver}/schedules/{sched}/update",
+        RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/versions/{ver}/schedules/{sched}/status",
+        RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/versions/{ver}/schedules/{sched}/{action}",
+        RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/schedules/re-enable", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/schedules/trigger-type/program-status", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/{ptype}/{pname}/previousruntime",
+        RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/apps/{app}/{ptype}/{pname}/nextruntime", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/previousruntime", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/nextruntime", RouterPathLookup.APP_FABRIC_PROCESSOR);
+    assertRouting("v3/namespaces/{ns}/instances", RouterPathLookup.APP_FABRIC_PROCESSOR);
   }
 
   @Test

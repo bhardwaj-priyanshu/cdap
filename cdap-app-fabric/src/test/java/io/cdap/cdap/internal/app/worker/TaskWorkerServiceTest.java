@@ -26,6 +26,8 @@ import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.conf.Constants.TaskWorker;
 import io.cdap.cdap.common.conf.SConfiguration;
+import io.cdap.cdap.common.encryption.AeadCipher;
+import io.cdap.cdap.common.encryption.NoOpAeadCipher;
 import io.cdap.cdap.common.http.CommonNettyHttpServiceFactory;
 import io.cdap.cdap.common.http.DefaultHttpRequestConfig;
 import io.cdap.cdap.common.metrics.NoOpMetricsCollectionService;
@@ -68,9 +70,12 @@ public class TaskWorkerServiceTest {
 
   private static final Gson GSON = new Gson();
   private static final MetricsCollectionService metricsCollectionService = new NoOpMetricsCollectionService();
+  private static final AeadCipher aeadCipher = new NoOpAeadCipher();
 
   private TaskWorkerService taskWorkerService;
   private CompletableFuture<Service.State> serviceCompletionFuture;
+
+  private SecurityManager securityManager;
 
   private CConfiguration createCConf() {
     CConfiguration cConf = CConfiguration.create();
@@ -88,7 +93,7 @@ public class TaskWorkerServiceTest {
   }
 
   @Before
-  public void beforeTest() {
+  public void beforeTest() throws Exception {
     CConfiguration cConf = createCConf();
     SConfiguration sConf = createSConf();
 
@@ -96,12 +101,14 @@ public class TaskWorkerServiceTest {
     TaskWorkerService taskWorkerService = new TaskWorkerService(
         cConf, sConf, discoveryService, discoveryService,
         metricsCollectionService,
-        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService));
+        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService, auditLogContexts -> {}, aeadCipher));
     serviceCompletionFuture = TaskWorkerTestUtil.getServiceCompletionFuture(
         taskWorkerService);
     // start the service
     taskWorkerService.startAndWait();
     this.taskWorkerService = taskWorkerService;
+    securityManager = System.getSecurityManager();
+    System.setSecurityManager(new NoExitSecurityManager());
   }
 
   @After
@@ -110,6 +117,7 @@ public class TaskWorkerServiceTest {
       taskWorkerService.stopAndWait();
       taskWorkerService = null;
     }
+    System.setSecurityManager(securityManager);
   }
 
   @Test
@@ -123,7 +131,7 @@ public class TaskWorkerServiceTest {
     TaskWorkerService taskWorkerService = new TaskWorkerService(
         cConf, sConf, discoveryService, discoveryService,
         metricsCollectionService,
-        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService));
+        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService, auditLogContexts -> {}, aeadCipher));
     serviceCompletionFuture = TaskWorkerTestUtil.getServiceCompletionFuture(
         taskWorkerService);
     // start the service
@@ -144,7 +152,7 @@ public class TaskWorkerServiceTest {
     TaskWorkerService taskWorkerService = new TaskWorkerService(
         cConf, sConf, discoveryService, discoveryService,
         metricsCollectionService,
-        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService));
+        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService, auditLogContexts -> {}, aeadCipher));
     serviceCompletionFuture = TaskWorkerTestUtil.getServiceCompletionFuture(
         taskWorkerService);
     // start the service
@@ -187,7 +195,7 @@ public class TaskWorkerServiceTest {
             discoveryService,
             discoveryService,
             metricsCollectionService,
-            new CommonNettyHttpServiceFactory(cConf, metricsCollectionService));
+            new CommonNettyHttpServiceFactory(cConf, metricsCollectionService, auditLogContexts -> {}, aeadCipher));
     serviceCompletionFuture = TaskWorkerTestUtil.getServiceCompletionFuture(
         taskWorkerService);
     // start the service
@@ -232,7 +240,7 @@ public class TaskWorkerServiceTest {
     TaskWorkerService taskWorkerService = new TaskWorkerService(
         cConf, sConf, discoveryService, discoveryService,
         metricsCollectionService,
-        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService));
+        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService, auditLogContexts -> {}, aeadCipher));
     serviceCompletionFuture = TaskWorkerTestUtil.getServiceCompletionFuture(
         taskWorkerService);
     // start the service
@@ -361,7 +369,7 @@ public class TaskWorkerServiceTest {
     TaskWorkerService taskWorkerService = new TaskWorkerService(cConf,
         createSConf(), discoveryService, discoveryService,
         metricsCollectionService,
-        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService));
+        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService, auditLogContexts -> {}, aeadCipher));
     taskWorkerService.startAndWait();
     InetSocketAddress addr = taskWorkerService.getBindAddress();
     URI uri = URI.create(
@@ -422,7 +430,7 @@ public class TaskWorkerServiceTest {
     TaskWorkerService taskWorkerService = new TaskWorkerService(cConf,
         createSConf(), discoveryService, discoveryService,
         metricsCollectionService,
-        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService));
+        new CommonNettyHttpServiceFactory(cConf, metricsCollectionService, auditLogContexts -> {}, aeadCipher));
     serviceCompletionFuture = TaskWorkerTestUtil.getServiceCompletionFuture(
         taskWorkerService);
     taskWorkerService.startAndWait();
@@ -494,6 +502,19 @@ public class TaskWorkerServiceTest {
         Thread.sleep(Integer.parseInt(context.getParam()));
       }
       context.writeResult(context.getParam().getBytes(StandardCharsets.UTF_8));
+    }
+  }
+
+  public class NoExitSecurityManager extends SecurityManager {
+
+    @Override
+    public void checkExit(int status) {
+      throw new SecurityException("System.exit attempted, status=" + status);
+    }
+
+    @Override
+    public void checkPermission(java.security.Permission perm) {
+      // allow everything else
     }
   }
 }

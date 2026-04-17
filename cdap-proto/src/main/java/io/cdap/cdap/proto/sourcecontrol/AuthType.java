@@ -20,5 +20,6 @@ package io.cdap.cdap.proto.sourcecontrol;
  * Auth Type Enums.
  */
 public enum AuthType {
-  PAT
+  PAT,
+  HTTP_ACCESS_TOKEN
 }

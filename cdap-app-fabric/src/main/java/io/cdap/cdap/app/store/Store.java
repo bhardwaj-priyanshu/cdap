@@ -465,6 +465,16 @@ public interface Store {
   ApplicationMeta getLatest(ApplicationReference appRef);
 
   /**
+   * Gets the ApplicationId with the latest version for the given ApplicationReference.
+   *
+   * @param appRef ApplicationReference
+   * @return ApplicationId for the latest version
+   *
+   * @throws ApplicationNotFoundException if the app was not found for the given application reference.
+   */
+  ApplicationId getLatestApp(ApplicationReference appRef) throws ApplicationNotFoundException;
+
+  /**
    * Scans for the latest applications across all namespaces.
    *
    * @param txBatchSize maximum number of applications to scan in one transaction to
@@ -727,6 +737,14 @@ public interface Store {
    * @throws ApplicationNotFoundException if application with appName is not found.
    */
   void deleteAllStates(NamespaceId namespaceId, String appName) throws ApplicationNotFoundException;
+
+  /**
+   * Get the count of latest applications in the namespace.
+   *
+   * @param namespaceId NamespaceId of the application.
+   * @return the count of applications in the namespace
+   */
+  long getApplicationCount(NamespaceId namespaceId);
 
   /**
    * Ensures the given program exists in the given application spec.

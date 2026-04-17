@@ -65,10 +65,12 @@ import io.cdap.cdap.app.preview.PreviewRunnerManagerModule;
 import io.cdap.cdap.common.conf.CConfiguration;
 import io.cdap.cdap.common.conf.Constants;
 import io.cdap.cdap.common.conf.SConfiguration;
+import io.cdap.cdap.common.encryption.guice.UserCredentialAeadEncryptionModule;
 import io.cdap.cdap.common.guice.ConfigModule;
 import io.cdap.cdap.common.guice.IOModule;
 import io.cdap.cdap.common.guice.InMemoryDiscoveryModule;
 import io.cdap.cdap.common.guice.LocalLocationModule;
+import io.cdap.cdap.common.guice.NoOpAuditLogModule;
 import io.cdap.cdap.common.guice.RemoteAuthenticatorModules;
 import io.cdap.cdap.common.http.DefaultHttpRequestConfig;
 import io.cdap.cdap.common.namespace.NamespaceAdmin;
@@ -85,6 +87,7 @@ import io.cdap.cdap.data2.datafabric.dataset.service.executor.DatasetOpExecutorS
 import io.cdap.cdap.data2.dataset2.lib.table.leveldb.LevelDBTableService;
 import io.cdap.cdap.gateway.handlers.AuthorizationHandler;
 import io.cdap.cdap.internal.app.runtime.AppStateStoreProvider;
+import io.cdap.cdap.internal.app.services.AppFabricProcessorService;
 import io.cdap.cdap.internal.app.services.AppFabricServer;
 import io.cdap.cdap.internal.app.worker.sidecar.ArtifactLocalizerService;
 import io.cdap.cdap.internal.capability.CapabilityConfig;
@@ -230,6 +233,7 @@ public class TestBase {
   private static FieldLineageAdmin fieldLineageAdmin;
   private static LineageAdmin lineageAdmin;
   private static AppFabricServer appFabricServer;
+  private static AppFabricProcessorService appFabricProcessorService;
   private static PreferencesService preferencesService;
   private static ArtifactLocalizerService artifactLocalizerService;
   private static AppStateStoreProvider appStateStoreProvider;
@@ -298,8 +302,9 @@ public class TestBase {
         new IOModule(),
         new LocalLocationModule(),
         new InMemoryDiscoveryModule(),
-        new AppFabricServiceRuntimeModule(cConf).getInMemoryModules(),
-        new MonitorHandlerModule(false),
+        new AppFabricServiceRuntimeModule(cConf, AppFabricServiceRuntimeModule.ALL_SERVICE_TYPES)
+            .getInMemoryModules(),
+        new MonitorHandlerModule(false, cConf),
         new AuthenticationContextModules().getMasterModule(),
         new AuthorizationModule(),
         new AuthorizationEnforcementModule().getInMemoryModules(),
@@ -318,9 +323,11 @@ public class TestBase {
         new LogReaderRuntimeModules().getInMemoryModules(),
         new MessagingServerRuntimeModule().getInMemoryModules(),
         new PreviewConfigModule(cConf, new Configuration(), SConfiguration.create()),
-        new PreviewManagerModule(false),
+        new PreviewManagerModule(cConf, false),
         new PreviewRunnerManagerModule().getInMemoryModules(),
         new MockProvisionerModule(),
+        new NoOpAuditLogModule(),
+        new UserCredentialAeadEncryptionModule(),
         new AbstractModule() {
           @Override
           protected void configure() {
@@ -422,6 +429,8 @@ public class TestBase {
     previewRunnerManager.startAndWait();
     appFabricServer = injector.getInstance(AppFabricServer.class);
     appFabricServer.startAndWait();
+    appFabricProcessorService = injector.getInstance(AppFabricProcessorService.class);
+    appFabricProcessorService.startAndWait();
     preferencesService = injector.getInstance(PreferencesService.class);
 
     scheduler = injector.getInstance(Scheduler.class);
@@ -555,7 +564,6 @@ public class TestBase {
     cConf.set(Constants.Transaction.Container.ADDRESS, localhost);
     cConf.set(Constants.Dataset.Executor.ADDRESS, localhost);
     cConf.set(Constants.Metrics.ADDRESS, localhost);
-    cConf.set(Constants.MetricsProcessor.BIND_ADDRESS, localhost);
     cConf.set(Constants.LogSaver.ADDRESS, localhost);
     cConf.set(Constants.Security.AUTH_SERVER_BIND_ADDRESS, localhost);
     cConf.set(Constants.Metadata.SERVICE_BIND_ADDRESS, localhost);
@@ -644,6 +652,7 @@ public class TestBase {
       ((Service) messagingService).stopAndWait();
     }
     appFabricServer.stopAndWait();
+    appFabricProcessorService.stopAndWait();
   }
 
   protected MetricsManager getMetricsManager() {

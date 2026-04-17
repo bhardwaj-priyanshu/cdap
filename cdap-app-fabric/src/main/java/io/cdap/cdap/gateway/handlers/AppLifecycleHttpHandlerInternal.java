@@ -56,6 +56,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
 import javax.ws.rs.POST;
 import javax.ws.rs.PUT;
@@ -109,18 +110,26 @@ public class AppLifecycleHttpHandlerInternal extends AbstractAppLifecycleHttpHan
       @QueryParam("pageToken") String pageToken,
       @QueryParam("pageSize") Integer pageSize,
       @QueryParam("orderBy") SortOrder orderBy,
-      @QueryParam("nameFilter") String nameFilter) throws Exception {
+      @QueryParam("nameFilter") String nameFilter,
+      @QueryParam("enableDefaultPagination") @DefaultValue("false") boolean enableDefaultPagination
+  ) throws Exception {
 
     NamespaceId namespaceId = new NamespaceId(namespace);
     if (!namespaceQueryAdmin.exists(namespaceId)) {
       throw new NamespaceNotFoundException(namespaceId);
     }
 
-    if (Optional.ofNullable(pageSize).orElse(0) != 0) {
+    if (pageSize == null && enableDefaultPagination) {
+      pageSize = configuration.getInt(Constants.GET_APPS_DEFAULT_PAGE_SIZE);
+    }
+
+    if (Optional.ofNullable(pageSize).orElse(0) > 0) {
+      Integer finalPageSize = pageSize;
       JsonPaginatedListResponder.respond(GSON, responder, APP_LIST_PAGINATED_KEY,
           jsonListResponder -> {
             AtomicReference<ApplicationRecord> lastRecord = new AtomicReference<>(null);
-            ScanApplicationsRequest scanRequest = getScanRequest(namespace, pageToken, pageSize,
+            ScanApplicationsRequest scanRequest = getScanRequest(namespace, pageToken,
+                finalPageSize,
                 orderBy, nameFilter);
             boolean pageLimitReached = applicationLifecycleService.scanApplications(scanRequest,
                 appDetail -> {
